@@ -1,0 +1,19 @@
+{
+  "name": "gialco-zk-sync-agent",
+  "version": "1.0.0",
+  "private": true,
+  "description": "On-LAN sync daemon: ZKTeco K50 Pro → GIALCO RH cloud API",
+  "main": "sync.js",
+  "scripts": {
+    "start": "node sync.js",
+    "dev": "node sync.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "axios": "^1.12.2",
+    "dotenv": "^16.6.1",
+    "zkteco-js": "^1.7.2"
+  }
+}

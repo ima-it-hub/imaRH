@@ -1,0 +1,38 @@
+# GIALCO RH — Render Blueprint
+# https://render.com/docs/blueprint-spec
+#
+# 1) Create a Convex production deployment and generate a Production Deploy Key
+# 2) Set CONVEX_DEPLOY_KEY in the Render dashboard (or below via dashboard secrets)
+# 3) Connect this repo and deploy as a Web Service
+
+services:
+  - type: web
+    name: rh-gialco
+    runtime: node
+    plan: free
+    region: frankfurt
+    rootDir: .
+    # Option A (recommended): deploy Convex during build — needs CONVEX_DEPLOY_KEY
+    buildCommand: npm ci && npm run build:render
+    # Option B (simpler): deploy Convex locally first, then on Render use:
+    #   buildCommand: npm ci && npm run build
+    #   and set NEXT_PUBLIC_CONVEX_URL to your prod Convex URL
+    startCommand: npm start
+    healthCheckPath: /login
+    envVars:
+      - key: NODE_VERSION
+        value: "20.18.0"
+      - key: NODE_ENV
+        value: production
+      # Required for build:render — Convex Dashboard → Production → Settings → Deploy Key
+      - key: CONVEX_DEPLOY_KEY
+        sync: false
+      # Shared with zk-sync-agent + Convex ZK_SYNC_SECRET (fingerprint sync)
+      - key: SYNC_SECRET
+        sync: false
+      # Optional ADMS allowlist (device serial numbers, comma-separated)
+      - key: ZK_DEVICE_SN
+        sync: false
+      # Only needed if you use Option B (npm run build without convex deploy):
+      # - key: NEXT_PUBLIC_CONVEX_URL
+      #   sync: false
