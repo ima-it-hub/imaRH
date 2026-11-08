@@ -110,6 +110,7 @@ type MonthRow = {
   month: number;
   salary: number;
   prime: number;
+  availablePrime: number;
   reduction: number;
   retraits: number;
   solde: number;
@@ -136,7 +137,6 @@ export function buildFinanceMonthRows(args: {
     month: number;
     year: number;
     baseSalary: number;
-    lateDeductions?: number;
     netPay?: number;
   }>;
   bonuses: Array<{
@@ -144,6 +144,11 @@ export function buildFinanceMonthRows(args: {
     attributedAt: number;
     month?: number;
     year?: number;
+  }>;
+  lateDeductions?: Array<{
+    month: number;
+    year: number;
+    amount: number;
   }>;
   orders: Array<{
     amount: number;
@@ -164,6 +169,7 @@ export function buildFinanceMonthRows(args: {
         month,
         salary: 0,
         prime: 0,
+        availablePrime: 0,
         reduction: 0,
         retraits: 0,
         solde: 0,
@@ -175,10 +181,16 @@ export function buildFinanceMonthRows(args: {
 
   for (const s of args.salaries) {
     const row = ensure(s.year, s.month);
-    row.salary += s.baseSalary;
-    row.reduction += s.lateDeductions ?? 0;
+    row.salary += s.netPay ?? s.baseSalary;
   }
 
+  for (const deduction of args.lateDeductions ?? []) {
+    const row = ensure(deduction.year, deduction.month);
+    row.reduction += deduction.amount;
+  }
+
+  const now = new Date();
+  const currentPeriod = now.getFullYear() * 12 + now.getMonth();
   for (const b of args.bonuses) {
     const period =
       b.year && b.month
@@ -186,7 +198,16 @@ export function buildFinanceMonthRows(args: {
         : periodFromTs(b.attributedAt);
     const row = ensure(period.year, period.month);
     row.prime += b.amount;
+
+    const releasePeriod = period.year * 12 + period.month - 1 + 3;
+    if (releasePeriod <= currentPeriod) {
+      const releaseYear = Math.floor(releasePeriod / 12);
+      const releaseMonth = (releasePeriod % 12) + 1;
+      ensure(releaseYear, releaseMonth).availablePrime += b.amount;
+    }
   }
+
+  ensure(now.getFullYear(), now.getMonth() + 1);
 
   for (const o of args.orders) {
     if (!["DEMANDE", "VALIDE", "PAYE"].includes(o.status)) continue;
@@ -202,7 +223,8 @@ export function buildFinanceMonthRows(args: {
   // Running available balance: each line accumulates net from all prior months
   let runningSolde = 0;
   for (const row of rows) {
-    const monthNet = row.salary + row.prime - row.reduction - row.retraits;
+    const monthNet =
+      row.salary + row.availablePrime - row.reduction - row.retraits;
     runningSolde += monthNet;
     row.solde = runningSolde;
   }
@@ -216,7 +238,6 @@ export function printFinanceHistory(args: {
     month: number;
     year: number;
     baseSalary: number;
-    lateDeductions?: number;
     netPay?: number;
   }>;
   bonuses: Array<{
@@ -224,6 +245,11 @@ export function printFinanceHistory(args: {
     attributedAt: number;
     month?: number;
     year?: number;
+  }>;
+  lateDeductions?: Array<{
+    month: number;
+    year: number;
+    amount: number;
   }>;
   orders: Array<{
     amount: number;
@@ -252,7 +278,7 @@ export function printFinanceHistory(args: {
               <td>${escapeHtml(row.label)}</td>
               <td class="num">${escapeHtml(moneyDZD(row.salary))}</td>
               <td class="num">${escapeHtml(moneyDZD(row.prime))}</td>
-              <td class="num">${escapeHtml(moneyDZD(row.reduction))}</td>
+              <td class="num">${escapeHtml(`-${moneyDZD(row.reduction)}`)}</td>
               <td class="num">${escapeHtml(moneyDZD(row.retraits))}</td>
               <td class="num">${escapeHtml(moneyDZD(row.solde))}</td>
             </tr>`
@@ -266,7 +292,7 @@ export function printFinanceHistory(args: {
           <td>Total</td>
           <td class="num">${escapeHtml(moneyDZD(totals.salary))}</td>
           <td class="num">${escapeHtml(moneyDZD(totals.prime))}</td>
-          <td class="num">${escapeHtml(moneyDZD(totals.reduction))}</td>
+          <td class="num">${escapeHtml(`-${moneyDZD(totals.reduction)}`)}</td>
           <td class="num">${escapeHtml(moneyDZD(totals.retraits))}</td>
           <td class="num">${escapeHtml(moneyDZD(finalSolde))}</td>
         </tr>`;
@@ -281,7 +307,7 @@ export function printFinanceHistory(args: {
           <th>Mois</th>
           <th class="num">Salaire</th>
           <th class="num">Prime</th>
-          <th class="num">Réduction</th>
+          <th class="num">Retards</th>
           <th class="num">Retraits</th>
           <th class="num">Solde disponible</th>
         </tr>
@@ -291,7 +317,7 @@ export function printFinanceHistory(args: {
         ${totalRow}
       </tbody>
     </table>
-    <p class="foot">Solde disponible = cumul (Salaire + Prime − Réduction − Retraits) de tous les mois précédents inclus</p>
+    <p class="foot">Solde disponible = cumul (Salaire + primes devenues disponibles après 3 mois − Retards validés − Retraits)</p>
   `;
 
   printDocument("Historique financier", html);

@@ -34,9 +34,6 @@ export const update = mutation({
   args: {
     token: v.string(),
     workingDaysPerMonth: v.number(),
-    primeObjectiveWeightPercent: v.number(),
-    primeRecoveryWeightPercent: v.number(),
-    primeEvaluationWeightPercent: v.number(),
   },
   handler: async (ctx, args) => {
     await requireAdmin(ctx, args.token);
@@ -45,14 +42,6 @@ export const update = mutation({
       .query("settings")
       .withIndex("by_key", (q) => q.eq("key", "default"))
       .unique();
-
-    const objW = Math.max(0, args.primeObjectiveWeightPercent);
-    const recW = Math.max(0, args.primeRecoveryWeightPercent);
-    const evalW = Math.max(0, args.primeEvaluationWeightPercent);
-    const weightSum = objW + recW + evalW;
-    if (weightSum <= 0) {
-      throw new Error("Les pondérations de prime doivent être > 0");
-    }
 
     const payload = {
       key: "default",
@@ -67,9 +56,11 @@ export const update = mutation({
       thursdayWorkEndHour: existing?.thursdayWorkEndHour ?? 12,
       thursdayWorkEndMinute: existing?.thursdayWorkEndMinute ?? 30,
       workingDaysPerMonth: Math.max(1, args.workingDaysPerMonth),
-      primeObjectiveWeightPercent: objW,
-      primeRecoveryWeightPercent: recW,
-      primeEvaluationWeightPercent: evalW,
+      primeObjectiveWeightPercent:
+        existing?.primeObjectiveWeightPercent ?? 80,
+      primeRecoveryWeightPercent: existing?.primeRecoveryWeightPercent ?? 0,
+      primeEvaluationWeightPercent:
+        existing?.primeEvaluationWeightPercent ?? 20,
     };
 
     if (existing) {

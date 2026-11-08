@@ -8,14 +8,14 @@ type LogoProps = {
 export function Logo({ variant = "full", className = "" }: LogoProps) {
   if (variant === "compact") {
     return (
-      <div className={`flex items-center ${className}`}>
+      <div className={`flex w-full items-center justify-center ${className}`}>
         <Image
-          src="/ima-logo.jpg"
+          src="/logo.png"
           alt="IMA Plomberie"
-          width={160}
-          height={72}
-          className="h-11 w-auto rounded-md bg-white object-contain p-1"
-          style={{ width: 160, height: "auto" }}
+          width={700}
+          height={400}
+          className="w-36 object-contain"
+          style={{ height: "auto" }}
           priority
         />
       </div>
@@ -25,10 +25,10 @@ export function Logo({ variant = "full", className = "" }: LogoProps) {
   return (
     <div className={`flex flex-col items-center ${className}`}>
       <Image
-        src="/ima-logo.jpg"
+        src="/logo.png"
         alt="IMA Plomberie"
-        width={260}
-        height={140}
+        width={700}
+        height={400}
         className="object-contain"
         style={{ width: 260, height: "auto" }}
         priority

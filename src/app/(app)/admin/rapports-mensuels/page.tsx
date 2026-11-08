@@ -10,23 +10,27 @@ import {
   Badge,
   Card,
   Field,
+  Modal,
   PrimaryButton,
   SecondaryButton,
   inputClass,
 } from "@/components/ui";
 import { useAuth } from "@/lib/auth";
-import { formatDate, moneyDZD } from "@/lib/format";
+import { formatDate } from "@/lib/format";
 
 type Draft = {
   adminReport: string;
   employeeReport: string;
   scores: Record<string, number>;
-  baseBonus: string;
 };
 
 export default function AdminReportsPage() {
   const { token } = useAuth();
   const reports = useQuery(api.reports.listAll, token ? { token } : "skip");
+  const employees = useQuery(
+    api.users.listEmployees,
+    token ? { token } : "skip"
+  );
   const confirmReport = useMutation(api.reports.confirm);
   const rejectReport = useMutation(api.reports.reject);
 
@@ -35,6 +39,13 @@ export default function AdminReportsPage() {
   const [msg, setMsg] = useState("");
   const [error, setError] = useState("");
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [period, setPeriod] = useState(() => {
+    const now = new Date();
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+  });
+  const [filterEmployeeId, setFilterEmployeeId] = useState("");
+  const [showUnevaluated, setShowUnevaluated] = useState(false);
+  const [periodYear, periodMonth] = period.split("-").map(Number);
 
   useEffect(() => {
     if (!reports) return;
@@ -48,20 +59,45 @@ export default function AdminReportsPage() {
         adminReport: r.adminReport || "",
         employeeReport: r.employeeReport || r.content || "",
         scores,
-        baseBonus: String(r.baseBonus ?? r.employee.baseBonus ?? 0),
       };
     }
     setDrafts(next);
   }, [reports]);
 
+  const filteredReports = useMemo(
+    () =>
+      (reports ?? []).filter(
+        (report) =>
+          report.year === periodYear &&
+          report.month === periodMonth &&
+          (!filterEmployeeId || report.employeeId === filterEmployeeId)
+      ),
+    [reports, periodYear, periodMonth, filterEmployeeId]
+  );
   const pending = useMemo(
-    () => (reports ?? []).filter((r) => r.status === "EN_ATTENTE"),
-    [reports]
+    () => filteredReports.filter((r) => r.status === "EN_ATTENTE"),
+    [filteredReports]
   );
   const confirmed = useMemo(
-    () => (reports ?? []).filter((r) => r.status === "CONFIRME"),
-    [reports]
+    () => filteredReports.filter((r) => r.status === "CONFIRME"),
+    [filteredReports]
   );
+  const unevaluatedEmployees = useMemo(() => {
+    const evaluatedIds = new Set(
+      (reports ?? [])
+        .filter(
+          (report) =>
+            report.year === periodYear && report.month === periodMonth
+        )
+        .map((report) => report.employeeId)
+    );
+    return (employees ?? []).filter(
+      (employee) =>
+        employee.isActive &&
+        (!filterEmployeeId || employee._id === filterEmployeeId) &&
+        !evaluatedIds.has(employee._id)
+    );
+  }, [employees, reports, periodYear, periodMonth, filterEmployeeId]);
 
   function draftPct(draft: Draft | undefined) {
     const values = Object.values(draft?.scores ?? {});
@@ -83,7 +119,6 @@ export default function AdminReportsPage() {
         reportId: reportId as Id<"monthlyReports">,
         adminReport: draft.adminReport,
         employeeReport: draft.employeeReport,
-        baseBonus: Number(draft.baseBonus) || 0,
         scores: Object.entries(draft.scores).map(([conditionId, points]) => ({
           conditionId: conditionId as Id<"evaluationConditions">,
           points,
@@ -108,6 +143,41 @@ export default function AdminReportsPage() {
         {msg ? <p className="mb-3 text-sm text-emerald-600">{msg}</p> : null}
 
         <Card className="mb-6">
+          <div className="flex flex-wrap items-end justify-between gap-3">
+            <div className="flex flex-wrap gap-3">
+              <Field label="Mois">
+                <input
+                  type="month"
+                  className={inputClass}
+                  value={period}
+                  onChange={(e) => setPeriod(e.target.value)}
+                />
+              </Field>
+              <Field label="Employé">
+                <select
+                  className={inputClass}
+                  value={filterEmployeeId}
+                  onChange={(e) => setFilterEmployeeId(e.target.value)}
+                >
+                  <option value="">Tous les employés</option>
+                  {(employees ?? []).map((employee) => (
+                    <option key={employee._id} value={employee._id}>
+                      {employee.name}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            </div>
+            <SecondaryButton
+              type="button"
+              onClick={() => setShowUnevaluated(true)}
+            >
+              Employés non évalués ({unevaluatedEmployees.length})
+            </SecondaryButton>
+          </div>
+        </Card>
+
+        <Card className="mb-6">
           <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
             <div>
               <h2 className="font-semibold text-zinc-900">
@@ -124,9 +194,6 @@ export default function AdminReportsPage() {
               const draft = drafts[report._id];
               const open = expandedId === report._id;
               const pct = draftPct(draft);
-              const prime = Math.round(
-                ((Number(draft?.baseBonus) || 0) * pct) / 100
-              );
               return (
                 <div
                   key={report._id}
@@ -156,9 +223,6 @@ export default function AdminReportsPage() {
                       </Badge>
                       <Badge className="bg-[#0088E8]/10 text-[#0088E8]">
                         {pct || report.percentage}%
-                      </Badge>
-                      <Badge className="bg-emerald-50 text-emerald-700">
-                        {moneyDZD(prime || report.computedBonus)}
                       </Badge>
                     </div>
                   </button>
@@ -191,29 +255,6 @@ export default function AdminReportsPage() {
                           </select>
                         </Field>
                       ))}
-
-                      <Field label="Prime de base (DZD)">
-                        <input
-                          type="number"
-                          min={0}
-                          className={inputClass}
-                          value={draft.baseBonus}
-                          onChange={(e) =>
-                            setDrafts((prev) => ({
-                              ...prev,
-                              [report._id]: {
-                                ...draft,
-                                baseBonus: e.target.value,
-                              },
-                            }))
-                          }
-                        />
-                      </Field>
-
-                      <p className="rounded-xl bg-zinc-50 px-3 py-2 text-xs text-zinc-600">
-                        Score {pct}% → prime estimée{" "}
-                        <strong>{moneyDZD(prime)}</strong>
-                      </p>
 
                       <Field label="Rapport admin">
                         <textarea
@@ -297,59 +338,71 @@ export default function AdminReportsPage() {
           </div>
         </Card>
 
-        <div className="space-y-3">
+        <Modal
+          open={showUnevaluated}
+          onClose={() => setShowUnevaluated(false)}
+          title={`Employés non évalués — ${periodMonth}/${periodYear}`}
+        >
+          <div className="space-y-2">
+            {unevaluatedEmployees.map((employee) => (
+              <div
+                key={employee._id}
+                className="rounded-lg border border-zinc-100 px-3 py-2"
+              >
+                <p className="font-medium text-zinc-900">{employee.name}</p>
+                <p className="text-xs text-zinc-500">
+                  {employee.department || "Aucun département"}
+                </p>
+              </div>
+            ))}
+            {!unevaluatedEmployees.length ? (
+              <p className="text-sm text-zinc-500">
+                Tous les employés correspondent à un rapport pour ce mois.
+              </p>
+            ) : null}
+          </div>
+        </Modal>
+
+        <div className="space-y-4">
           <h2 className="font-semibold text-zinc-900">Confirmées</h2>
           {confirmed.map((report) => (
             <Card key={report._id}>
-              <div className="mb-2 flex flex-wrap items-center justify-between gap-3">
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <h3 className="font-semibold text-zinc-900">
-                    {report.employee.name} · {report.month}/{report.year}
+                    Évaluation {report.month}/{report.year}
                   </h3>
                   <p className="text-xs text-zinc-500">
-                    Par {report.authorName} · confirmée le{" "}
+                    {report.employee.name} · par {report.authorName} · publiée
+                    le{" "}
                     {formatDate(report.confirmedAt ?? report.publishedAt)}
                   </p>
                 </div>
                 <div className="flex flex-wrap gap-2">
-                  <Badge className="bg-emerald-50 text-emerald-700">
-                    Confirmée
-                  </Badge>
                   <Badge className="bg-[#0088E8]/10 text-[#0088E8]">
-                    {report.percentage}%
-                  </Badge>
-                  <Badge className="bg-zinc-100 text-zinc-700">
-                    Prime {moneyDZD(report.computedBonus)}
+                    Score {report.percentage}%
                   </Badge>
                 </div>
               </div>
               {(report.scores ?? []).length > 0 ? (
-                <div className="mb-3 grid gap-1 sm:grid-cols-2">
-                  {report.scores.map((s) => (
-                    <p key={s.conditionId} className="text-xs text-zinc-600">
-                      {s.label} : <strong>{s.points}/5</strong>
-                    </p>
+                <div className="mb-4 grid gap-2 sm:grid-cols-2">
+                  {report.scores.map((score) => (
+                    <div
+                      key={score.conditionId}
+                      className="rounded-xl border border-zinc-100 bg-zinc-50 px-3 py-2 text-sm"
+                    >
+                      <p className="text-zinc-600">{score.label}</p>
+                      <p className="font-semibold text-zinc-900">
+                        {score.points}/5 ·{" "}
+                        {Math.round((score.points / 5) * 100)}%
+                      </p>
+                    </div>
                   ))}
                 </div>
               ) : null}
-              <div className="space-y-3">
-                <div>
-                  <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-zinc-500">
-                    Rapport admin
-                  </p>
-                  <p className="whitespace-pre-wrap text-sm leading-6 text-zinc-700">
-                    {report.adminReport || "—"}
-                  </p>
-                </div>
-                <div>
-                  <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-zinc-500">
-                    Rapport employé
-                  </p>
-                  <p className="whitespace-pre-wrap text-sm leading-6 text-zinc-700">
-                    {report.employeeReport || report.content || "—"}
-                  </p>
-                </div>
-              </div>
+              <p className="whitespace-pre-wrap text-sm leading-6 text-zinc-700">
+                {report.employeeReport || report.content || "—"}
+              </p>
             </Card>
           ))}
           {!confirmed.length ? (

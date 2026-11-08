@@ -4,12 +4,12 @@ import { v } from "convex/values";
 import { Id } from "./_generated/dataModel";
 import {
   isFinanceDepartment,
-  monthBounds,
   notify,
   prorateMonthlySalary,
   publicUser,
   requireAdmin,
   requireUser,
+  todayISO,
 } from "./lib";
 
 async function requireFinanceStaff(ctx: MutationCtx | QueryCtx, token: string) {
@@ -51,17 +51,43 @@ async function computeBalance(ctx: QueryCtx | MutationCtx, employeeId: Id<"users
     .query("bonuses")
     .withIndex("by_employee", (q) => q.eq("employeeId", employeeId))
     .collect();
+  const approvedDeductions = await ctx.db
+    .query("approvedLateDeductions")
+    .withIndex("by_employee", (q) => q.eq("employeeId", employeeId))
+    .collect();
   const orders = await ctx.db
     .query("paymentOrders")
     .withIndex("by_employee", (q) => q.eq("employeeId", employeeId))
     .collect();
 
   const totalSalaries = salaries.reduce(
-    (sum, s) => sum + (s.netPay ?? s.baseSalary),
+    (sum, s) =>
+      sum + Math.max(0, s.baseSalary - (s.leaveDeductions ?? 0)),
     0
   );
   const totalBonuses = bonuses.reduce((sum, b) => sum + b.amount, 0);
-  const totalCredits = totalSalaries + totalBonuses;
+  const [currentYear, currentMonth] = todayISO()
+    .slice(0, 7)
+    .split("-")
+    .map(Number);
+  const currentPeriod = currentYear * 12 + currentMonth - 1;
+  const availableBonuses = bonuses.reduce((sum, bonus) => {
+    const [bonusYear, bonusMonth] =
+      bonus.year != null && bonus.month != null
+        ? [bonus.year, bonus.month]
+        : todayISO(new Date(bonus.attributedAt))
+            .slice(0, 7)
+            .split("-")
+            .map(Number);
+    const bonusPeriod = bonusYear * 12 + bonusMonth - 1;
+    return currentPeriod - bonusPeriod >= 3 ? sum + bonus.amount : sum;
+  }, 0);
+  const totalLateDeductions = approvedDeductions.reduce(
+    (sum, deduction) => sum + deduction.amount,
+    0
+  );
+  const totalCredits =
+    totalSalaries + availableBonuses - totalLateDeductions;
 
   // Pending, validated and paid requests reduce the available balance
   const reservedOrPaid = orders
@@ -73,6 +99,8 @@ async function computeBalance(ctx: QueryCtx | MutationCtx, employeeId: Id<"users
   return {
     totalSalaries,
     totalBonuses,
+    availableBonuses,
+    totalLateDeductions,
     totalCredits,
     reservedOrPaid,
     available,
@@ -95,9 +123,15 @@ export const mySalaries = query({
       .query("salaries")
       .withIndex("by_employee", (q) => q.eq("employeeId", user._id))
       .collect();
-    return rows.sort((a, b) =>
-      a.year === b.year ? b.month - a.month : b.year - a.year
-    );
+    return rows
+      .map((salary) => ({
+        ...salary,
+        lateDeductions: 0,
+        netPay: Math.max(0, salary.baseSalary - (salary.leaveDeductions ?? 0)),
+      }))
+      .sort((a, b) =>
+        a.year === b.year ? b.month - a.month : b.year - a.year
+      );
   },
 });
 
@@ -110,6 +144,28 @@ export const myBonuses = query({
       .withIndex("by_employee", (q) => q.eq("employeeId", user._id))
       .collect();
     return rows.sort((a, b) => b.attributedAt - a.attributedAt);
+  },
+});
+
+export const myLateDeductions = query({
+  args: { token: v.string() },
+  handler: async (ctx, args) => {
+    const user = await requireUser(ctx, args.token);
+    const rows = await ctx.db
+      .query("approvedLateDeductions")
+      .withIndex("by_employee", (q) => q.eq("employeeId", user._id))
+      .collect();
+    return rows
+      .filter((row) => row.amount > 0)
+      .sort((a, b) =>
+        a.year === b.year ? b.month - a.month : b.year - a.year
+      )
+      .map((row) => ({
+        _id: row._id,
+        month: row.month,
+        year: row.year,
+        amount: row.amount,
+      }));
   },
 });
 
@@ -257,20 +313,6 @@ export const salariesForMonth = query({
   },
   handler: async (ctx, args) => {
     await requireAdmin(ctx, args.token);
-    const { start, end } = monthBounds(args.year, args.month);
-    const attendanceRows = await ctx.db
-      .query("attendances")
-      .withIndex("by_date", (q) => q.gte("date", start).lte("date", end))
-      .collect();
-    const lateDeductionsByEmployee = new Map<string, number>();
-    for (const attendance of attendanceRows) {
-      lateDeductionsByEmployee.set(
-        attendance.employeeId,
-        (lateDeductionsByEmployee.get(attendance.employeeId) ?? 0) +
-          (attendance.delayAmount ?? 0)
-      );
-    }
-
     const employees = (await ctx.db.query("users").collect())
       .filter(
         (u) =>
@@ -314,8 +356,6 @@ export const salariesForMonth = query({
 
       result.push({
         employee: publicUser(employee),
-        attendanceLateDeductions:
-          lateDeductionsByEmployee.get(employee._id) ?? 0,
         salary: salary
           ? {
               _id: salary._id,
@@ -324,9 +364,12 @@ export const salariesForMonth = query({
                 salary.contractualSalary ?? contractual,
               daysWorked: salary.daysWorked,
               daysInMonth: salary.daysInMonth,
-              lateDeductions: salary.lateDeductions ?? 0,
+              lateDeductions: 0,
               leaveDeductions: salary.leaveDeductions ?? 0,
-              netPay: salary.netPay ?? salary.baseSalary,
+              netPay: Math.max(
+                0,
+                salary.baseSalary - (salary.leaveDeductions ?? 0)
+              ),
             }
           : null,
         proration: {
@@ -360,7 +403,7 @@ export const salariesForMonth = query({
   },
 });
 
-/** Year overview: defined salaries + confirmed evaluation primes per month. */
+/** Year overview: defined salaries + monthly calculated primes. */
 export const yearSalaryPrimeSummary = query({
   args: {
     token: v.string(),
@@ -373,32 +416,57 @@ export const yearSalaryPrimeSummary = query({
       (s) => s.year === args.year
     );
     const reports = (await ctx.db.query("monthlyReports").collect()).filter(
-      (r) => r.year === args.year && (r.status ?? "CONFIRME") === "CONFIRME"
+      (report) =>
+        report.year === args.year &&
+        (report.status ?? "CONFIRME") === "CONFIRME"
     );
 
     const months = [];
     for (let month = 1; month <= 12; month++) {
       const monthSalaries = salaries.filter((s) => s.month === month);
-      const monthPrimes = reports.filter((r) => r.month === month);
+      const monthCalculations = await ctx.db
+        .query("primeCalculations")
+        .withIndex("by_period", (q) =>
+          q.eq("year", args.year).eq("month", month)
+        )
+        .collect();
+      const calculatedPrimes = monthCalculations.filter(
+        (calculation) =>
+          calculation.calculationVersion === 2 &&
+          calculation.status === "CONFIRME"
+      );
+      const legacyPrimes =
+        calculatedPrimes.length === 0
+          ? reports.filter((report) => report.month === month)
+          : [];
       const totalSalary = monthSalaries.reduce(
-        (sum, s) => sum + (s.netPay ?? s.baseSalary),
+        (sum, s) =>
+          sum + Math.max(0, s.baseSalary - (s.leaveDeductions ?? 0)),
         0
       );
       const totalDeductions = monthSalaries.reduce(
-        (sum, s) =>
-          sum + (s.lateDeductions ?? 0) + (s.leaveDeductions ?? 0),
+        (sum, s) => sum + (s.leaveDeductions ?? 0),
         0
       );
       const totalBase = monthSalaries.reduce((sum, s) => sum + s.baseSalary, 0);
-      const totalPrimes = monthPrimes.reduce(
-        (sum, r) => sum + (r.computedBonus ?? 0),
-        0
-      );
+      const totalPrimes =
+        calculatedPrimes.length > 0
+          ? calculatedPrimes.reduce(
+              (sum, calculation) => sum + calculation.totalAmount,
+              0
+            )
+          : legacyPrimes.reduce(
+              (sum, report) => sum + (report.computedBonus ?? 0),
+              0
+            );
       months.push({
         month,
         year: args.year,
         salaryCount: monthSalaries.length,
-        primeCount: monthPrimes.length,
+        primeCount:
+          calculatedPrimes.length > 0
+            ? calculatedPrimes.length
+            : legacyPrimes.length,
         totalBase,
         totalDeductions,
         totalSalary,
@@ -410,6 +478,72 @@ export const yearSalaryPrimeSummary = query({
     return months;
   },
 });
+
+async function syncSalaryPaymentOrder(
+  ctx: MutationCtx,
+  args: {
+    salaryId: Id<"salaries">;
+    employeeId: Id<"users">;
+    amount: number;
+    month: number;
+    year: number;
+  },
+  now: number,
+  options?: { preservePaidOrder?: boolean }
+) {
+  const existing = await ctx.db
+    .query("paymentOrders")
+    .withIndex("by_salary", (q) => q.eq("salaryId", args.salaryId))
+    .unique();
+  const note = `Salaire mensuel ${args.month}/${args.year}`;
+
+  if (args.amount <= 0) {
+    if (existing?.status === "DEMANDE" || existing?.status === "REJETE") {
+      await ctx.db.delete(existing._id);
+      return "removed" as const;
+    }
+    if (existing && existing.amount !== args.amount) {
+      throw new Error(
+        `Le salaire de ${args.month}/${args.year} a déjà été validé ou payé. Corrigez l'ordre avant de modifier ce salaire.`
+      );
+    }
+    return "unchanged" as const;
+  }
+
+  if (existing) {
+    if (
+      (existing.status === "VALIDE" || existing.status === "PAYE") &&
+      existing.amount !== args.amount
+    ) {
+      if (options?.preservePaidOrder) return "unchanged" as const;
+      throw new Error(
+        `Le salaire de ${args.month}/${args.year} a déjà été validé ou payé. Corrigez l'ordre avant de modifier ce salaire.`
+      );
+    }
+    if (existing.status === "DEMANDE" && existing.amount === args.amount) {
+      return "unchanged" as const;
+    }
+    await ctx.db.patch(existing._id, {
+      amount: args.amount,
+      note,
+      status: "DEMANDE",
+      requestedAt: now,
+      treatedAt: undefined,
+    });
+    return "updated" as const;
+  }
+
+  await ctx.db.insert("paymentOrders", {
+    employeeId: args.employeeId,
+    salaryId: args.salaryId,
+    type: "SALAIRE_MENSUEL",
+    amount: args.amount,
+    status: "DEMANDE",
+    note,
+    requestedAt: now,
+  });
+  return "created" as const;
+}
 
 export const setSalariesBatch = mutation({
   args: {
@@ -432,6 +566,8 @@ export const setSalariesBatch = mutation({
     }
 
     let saved = 0;
+    let paymentOrdersCreated = 0;
+    let paymentOrdersUpdated = 0;
     for (const entry of args.entries) {
       if (entry.baseSalary < 0) {
         throw new Error("Le salaire ne peut pas être négatif");
@@ -442,7 +578,6 @@ export const setSalariesBatch = mutation({
         throw new Error("Employé introuvable");
       }
 
-      const lateDeductions = Math.max(0, entry.lateDeductions ?? 0);
       const contractual = entry.baseSalary;
 
       // Keep contractual full monthly salary on the employee profile
@@ -466,27 +601,43 @@ export const setSalariesBatch = mutation({
         )
         .unique();
 
+      const hadLateSalaryDeduction =
+        existing != null &&
+        existing.baseSalary === monthAmount &&
+        (existing.lateDeductions ?? 0) > 0 &&
+        (existing.netPay ??
+          Math.max(
+            0,
+            existing.baseSalary -
+              (existing.lateDeductions ?? 0) -
+              (existing.leaveDeductions ?? 0)
+          )) ===
+          Math.max(
+            0,
+            existing.baseSalary -
+              (existing.lateDeductions ?? 0) -
+              (existing.leaveDeductions ?? 0)
+          );
       const leaveDeductions = existing?.leaveDeductions ?? 0;
-      const netPay = Math.max(
-        0,
-        monthAmount - lateDeductions - leaveDeductions
-      );
+      const netPay = Math.max(0, monthAmount - leaveDeductions);
 
       const salaryFields = {
         baseSalary: monthAmount,
         contractualSalary: contractual,
         daysWorked: proration.daysWorked,
         daysInMonth: proration.daysInMonth,
-        lateDeductions,
+        lateDeductions: 0,
         leaveDeductions,
         netPay,
         updatedAt: Date.now(),
       };
 
+      let salaryId: Id<"salaries">;
       if (existing) {
         await ctx.db.patch(existing._id, salaryFields);
+        salaryId = existing._id;
       } else {
-        await ctx.db.insert("salaries", {
+        salaryId = await ctx.db.insert("salaries", {
           employeeId: entry.employeeId,
           ...salaryFields,
           leaveDeductions: leaveDeductions || 0,
@@ -494,10 +645,24 @@ export const setSalariesBatch = mutation({
           year: args.year,
         });
       }
+      const orderResult = await syncSalaryPaymentOrder(
+        ctx,
+        {
+          salaryId,
+          employeeId: entry.employeeId,
+          amount: netPay,
+          month: args.month,
+          year: args.year,
+        },
+        Date.now(),
+        { preservePaidOrder: hadLateSalaryDeduction }
+      );
+      if (orderResult === "created") paymentOrdersCreated += 1;
+      if (orderResult === "updated") paymentOrdersUpdated += 1;
       saved += 1;
     }
 
-    return { saved };
+    return { saved, paymentOrdersCreated, paymentOrdersUpdated };
   },
 });
 
@@ -515,7 +680,6 @@ export const setBaseSalary = mutation({
     const employee = await ctx.db.get(args.employeeId);
     if (!employee) throw new Error("Employé introuvable");
 
-    const lateDeductions = args.lateDeductions ?? 0;
     const contractual = args.baseSalary;
 
     await ctx.db.patch(args.employeeId, { baseSalary: contractual });
@@ -541,7 +705,7 @@ export const setBaseSalary = mutation({
     const leaveDeductions = existing?.leaveDeductions ?? 0;
     const netPay = Math.max(
       0,
-      monthAmount - lateDeductions - leaveDeductions
+      monthAmount - leaveDeductions
     );
 
     const salaryFields = {
@@ -549,7 +713,7 @@ export const setBaseSalary = mutation({
       contractualSalary: contractual,
       daysWorked: proration.daysWorked,
       daysInMonth: proration.daysInMonth,
-      lateDeductions,
+      lateDeductions: 0,
       leaveDeductions,
       netPay,
       updatedAt: Date.now(),
@@ -645,7 +809,7 @@ export const employeeHistory = query({
       throw new Error("Employé introuvable");
     }
 
-    const salaries = (
+    const salaryRows = (
       await ctx.db
         .query("salaries")
         .withIndex("by_employee", (q) => q.eq("employeeId", args.employeeId))
@@ -653,6 +817,11 @@ export const employeeHistory = query({
     ).sort((a, b) =>
       a.year === b.year ? b.month - a.month : b.year - a.year
     );
+    const salaries = salaryRows.map((salary) => ({
+      ...salary,
+      lateDeductions: 0,
+      netPay: Math.max(0, salary.baseSalary - (salary.leaveDeductions ?? 0)),
+    }));
 
     const bonuses = (
       await ctx.db
@@ -669,11 +838,16 @@ export const employeeHistory = query({
     ).sort((a, b) => b.requestedAt - a.requestedAt);
 
     const balance = await computeBalance(ctx, args.employeeId);
+    const lateDeductions = await ctx.db
+      .query("approvedLateDeductions")
+      .withIndex("by_employee", (q) => q.eq("employeeId", args.employeeId))
+      .collect();
 
     return {
       employee: publicUser(employee),
       salaries,
       bonuses,
+      lateDeductions,
       orders,
       balance,
     };
@@ -734,6 +908,66 @@ export const treatPaymentOrder = mutation({
     }
 
     return await ctx.db.get(args.orderId);
+  },
+});
+
+export const validatePaymentOrdersBatch = mutation({
+  args: {
+    token: v.string(),
+    orderIds: v.array(v.id("paymentOrders")),
+  },
+  handler: async (ctx, args) => {
+    await requireAdmin(ctx, args.token);
+    const uniqueIds = [...new Set(args.orderIds)];
+    if (uniqueIds.length === 0) {
+      throw new Error("Sélectionnez au moins une demande");
+    }
+
+    const orders = [];
+    for (const orderId of uniqueIds) {
+      const order = await ctx.db.get(orderId);
+      if (!order) throw new Error("Une demande sélectionnée est introuvable");
+      if (order.status !== "DEMANDE") {
+        throw new Error(
+          "Toutes les demandes sélectionnées doivent être en attente"
+        );
+      }
+      orders.push(order);
+    }
+
+    const now = Date.now();
+    const financeStaff = (await ctx.db.query("users").collect()).filter(
+      (user) =>
+        user.role === "employee" &&
+        user.isActive &&
+        !user.resignedAt &&
+        isFinanceDepartment(user.department)
+    );
+
+    for (const order of orders) {
+      await ctx.db.patch(order._id, {
+        status: "VALIDE",
+        treatedAt: now,
+      });
+
+      const employee = await ctx.db.get(order.employeeId);
+      await notify(
+        ctx,
+        order.employeeId,
+        "Demande de paiement",
+        `Votre demande de ${order.amount.toLocaleString("fr-DZ")} DZD a été validée.`
+      );
+      for (const staff of financeStaff) {
+        await notify(
+          ctx,
+          staff._id,
+          "Paiement à régler",
+          `${employee?.name ?? "Un collaborateur"} — ${order.amount.toLocaleString("fr-DZ")} DZD (${order.type}) validé par l'admin.`
+        );
+      }
+    }
+
+    return { validated: orders.length };
   },
 });
 

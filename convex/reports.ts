@@ -2,7 +2,6 @@ import { mutation, query, MutationCtx } from "./_generated/server";
 import { v } from "convex/values";
 import { Doc, Id } from "./_generated/dataModel";
 import {
-  computeEvaluationBonus,
   evaluationPercentage,
   notify,
   publicUser,
@@ -86,67 +85,6 @@ async function buildScores(
     });
   }
   return scored;
-}
-
-async function syncEvaluationBonus(
-  ctx: MutationCtx,
-  args: {
-    reportId: Id<"monthlyReports">;
-    employeeId: Id<"users">;
-    month: number;
-    year: number;
-    baseBonus: number;
-    percentage: number;
-    computedBonus: number;
-    existingBonusId?: Id<"bonuses">;
-  }
-) {
-  const bonusTitle = `Prime d'évaluation ${args.month}/${args.year}`;
-  const bonusReason = `Prime de base ${args.baseBonus.toLocaleString("fr-DZ")} DZD × ${args.percentage}%`;
-  let bonusId = args.existingBonusId;
-
-  if (args.computedBonus > 0) {
-    if (bonusId) {
-      const bonus = await ctx.db.get(bonusId);
-      if (bonus) {
-        await ctx.db.patch(bonusId, {
-          amount: args.computedBonus,
-          title: bonusTitle,
-          reason: bonusReason,
-          attributedAt: Date.now(),
-          month: args.month,
-          year: args.year,
-          reportId: args.reportId,
-        });
-      } else {
-        bonusId = await ctx.db.insert("bonuses", {
-          employeeId: args.employeeId,
-          amount: args.computedBonus,
-          title: bonusTitle,
-          reason: bonusReason,
-          attributedAt: Date.now(),
-          month: args.month,
-          year: args.year,
-          reportId: args.reportId,
-        });
-      }
-    } else {
-      bonusId = await ctx.db.insert("bonuses", {
-        employeeId: args.employeeId,
-        amount: args.computedBonus,
-        title: bonusTitle,
-        reason: bonusReason,
-        attributedAt: Date.now(),
-        month: args.month,
-        year: args.year,
-        reportId: args.reportId,
-      });
-    }
-    await ctx.db.patch(args.reportId, { bonusId });
-  } else if (bonusId) {
-    await ctx.db.delete(bonusId);
-    await ctx.db.patch(args.reportId, { bonusId: undefined });
-  }
 }
 
 export const myReports = query({
@@ -327,7 +265,6 @@ export const publish = mutation({
     );
     const percentage = evaluationPercentage(scored);
     const baseBonus = employee.baseBonus ?? 0;
-    const computedBonus = computeEvaluationBonus(baseBonus, percentage);
 
     const existing = await ctx.db
       .query("monthlyReports")
@@ -354,7 +291,7 @@ export const publish = mutation({
       scores: scored,
       percentage,
       baseBonus,
-      computedBonus,
+      computedBonus: 0,
       status: "EN_ATTENTE" as const,
       submittedAt: now,
       publishedAt: now,
@@ -390,7 +327,7 @@ export const publish = mutation({
   },
 });
 
-/** Admin: edit + confirm evaluation → visible to employee + prime created. */
+/** Admin: edit and confirm an evaluation report. */
 export const confirm = mutation({
   args: {
     token: v.string(),
@@ -405,7 +342,6 @@ export const confirm = mutation({
         })
       )
     ),
-    baseBonus: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
     const admin = await requireAdmin(ctx, args.token);
@@ -435,11 +371,6 @@ export const confirm = mutation({
     }
 
     const percentage = evaluationPercentage(scored);
-    const baseBonus =
-      args.baseBonus !== undefined
-        ? args.baseBonus
-        : (employee.baseBonus ?? report.baseBonus ?? 0);
-    const computedBonus = computeEvaluationBonus(baseBonus, percentage);
     const now = Date.now();
 
     await ctx.db.patch(args.reportId, {
@@ -448,34 +379,18 @@ export const confirm = mutation({
       content: employeeReport,
       scores: scored,
       percentage,
-      baseBonus,
-      computedBonus,
+      computedBonus: 0,
       status: "CONFIRME",
       confirmedAt: now,
       confirmedBy: admin._id,
       publishedAt: now,
     });
 
-    if (args.baseBonus !== undefined) {
-      await ctx.db.patch(employee._id, { baseBonus: args.baseBonus });
-    }
-
-    await syncEvaluationBonus(ctx, {
-      reportId: args.reportId,
-      employeeId: report.employeeId,
-      month: report.month,
-      year: report.year,
-      baseBonus,
-      percentage,
-      computedBonus,
-      existingBonusId: report.bonusId,
-    });
-
     await notify(
       ctx,
       report.employeeId,
       "Évaluation mensuelle confirmée",
-      `Votre évaluation ${report.month}/${report.year} : ${percentage}% — prime ${computedBonus.toLocaleString("fr-DZ")} DZD.`
+      `Votre évaluation ${report.month}/${report.year} : ${percentage}%.`
     );
 
     return await ctx.db.get(args.reportId);
@@ -500,86 +415,5 @@ export const reject = mutation({
     }
     await ctx.db.delete(args.reportId);
     return { ok: true };
-  },
-});
-
-/** Confirm pending evaluation primes in batch (finance page, like salaries). */
-export const confirmPrimesBatch = mutation({
-  args: {
-    token: v.string(),
-    month: v.number(),
-    year: v.number(),
-    entries: v.array(
-      v.object({
-        reportId: v.id("monthlyReports"),
-        baseBonus: v.number(),
-        /** Optional admin override of calculated prime */
-        computedBonus: v.optional(v.number()),
-      })
-    ),
-  },
-  handler: async (ctx, args) => {
-    const admin = await requireAdmin(ctx, args.token);
-    let confirmed = 0;
-
-    for (const entry of args.entries) {
-      const report = await ctx.db.get(entry.reportId);
-      if (!report) continue;
-      if (report.month !== args.month || report.year !== args.year) {
-        throw new Error("Période d'évaluation incorrecte");
-      }
-      if (reportStatus(report) === "CONFIRME") continue;
-
-      const employee = await ctx.db.get(report.employeeId);
-      if (!employee || employee.resignedAt) continue;
-
-      const scored = report.scores ?? [];
-      if (!scored.length) {
-        throw new Error(
-          `Évaluation incomplète pour ${employee.name} (aucune note)`
-        );
-      }
-
-      const percentage = evaluationPercentage(scored);
-      const baseBonus = Math.max(0, entry.baseBonus);
-      const autoBonus = computeEvaluationBonus(baseBonus, percentage);
-      const computedBonus =
-        entry.computedBonus !== undefined
-          ? Math.max(0, Math.round(entry.computedBonus))
-          : autoBonus;
-      const now = Date.now();
-
-      await ctx.db.patch(entry.reportId, {
-        percentage,
-        baseBonus,
-        computedBonus,
-        status: "CONFIRME",
-        confirmedAt: now,
-        confirmedBy: admin._id,
-        publishedAt: now,
-      });
-      await ctx.db.patch(employee._id, { baseBonus });
-
-      await syncEvaluationBonus(ctx, {
-        reportId: entry.reportId,
-        employeeId: report.employeeId,
-        month: report.month,
-        year: report.year,
-        baseBonus,
-        percentage,
-        computedBonus,
-        existingBonusId: report.bonusId,
-      });
-
-      await notify(
-        ctx,
-        report.employeeId,
-        "Évaluation mensuelle confirmée",
-        `Votre évaluation ${report.month}/${report.year} : ${percentage}% — prime ${computedBonus.toLocaleString("fr-DZ")} DZD.`
-      );
-      confirmed += 1;
-    }
-
-    return { confirmed };
   },
 });

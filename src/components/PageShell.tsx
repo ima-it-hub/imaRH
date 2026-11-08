@@ -3,6 +3,7 @@ type PageShellProps = {
   description?: string;
   children: React.ReactNode;
   action?: React.ReactNode;
+  className?: string;
 };
 
 export function PageShell({
@@ -10,9 +11,10 @@ export function PageShell({
   description,
   children,
   action,
+  className = "max-w-6xl",
 }: PageShellProps) {
   return (
-    <div className="mx-auto w-full max-w-6xl">
+    <div className={`mx-auto w-full ${className}`}>
       <div className="mb-8 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight text-zinc-900 sm:text-3xl">

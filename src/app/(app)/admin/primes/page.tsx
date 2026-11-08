@@ -11,16 +11,10 @@ import {
   Card,
   Field,
   PrimaryButton,
-  SecondaryButton,
   inputClass,
 } from "@/components/ui";
 import { useAuth } from "@/lib/auth";
 import { moneyDZD } from "@/lib/format";
-
-type PrimeDraft = {
-  baseBonus: string;
-  computedBonus: string;
-};
 
 export default function AdminPrimesPage() {
   const { token } = useAuth();
@@ -29,22 +23,9 @@ export default function AdminPrimesPage() {
     token ? { token } : "skip"
   );
   const bonuses = useQuery(api.finances.listBonuses, token ? { token } : "skip");
-  const setBaseBonus = useMutation(api.users.setBaseBonus);
-  const confirmPrimesBatch = useMutation(api.reports.confirmPrimesBatch);
-  const confirmCommercialBatch = useMutation(
-    api.primeCalculations.confirmBatch
-  );
-  const grantBonus = useMutation(api.finances.grantBonus);
-
   const now = new Date();
   const [month, setMonth] = useState(now.getMonth() + 1);
   const [year, setYear] = useState(now.getFullYear());
-  const [primeDrafts, setPrimeDrafts] = useState<Record<string, PrimeDraft>>(
-    {}
-  );
-  const [commercialDrafts, setCommercialDrafts] = useState<
-    Record<string, string>
-  >({});
   const [busy, setBusy] = useState(false);
   const [bonusEmployeeId, setBonusEmployeeId] = useState("");
   const [bonusAmount, setBonusAmount] = useState("");
@@ -53,172 +34,77 @@ export default function AdminPrimesPage() {
   const [msg, setMsg] = useState("");
   const [error, setError] = useState("");
 
-  const monthRows = useQuery(
-    api.finances.salariesForMonth,
+  const primeRows = useQuery(
+    api.primeCalculations.employeesForMonth,
     token ? { token, month, year } : "skip"
   );
-  const commercialRows = useQuery(
-    api.primeCalculations.percentageEmployeesForMonth,
-    token ? { token, month, year } : "skip"
+  const confirmPrimes = useMutation(api.primeCalculations.confirmBatch);
+  const syncInheritedDrafts = useMutation(
+    api.primeCalculations.syncInheritedDrafts
+  );
+  const grantBonus = useMutation(api.finances.grantBonus);
+
+  useEffect(() => {
+    if (!token) return;
+    let active = true;
+    void syncInheritedDrafts({ token, month, year }).catch((err: unknown) => {
+      if (active) {
+        setError(
+          err instanceof Error
+            ? err.message
+            : "Impossible de préparer les primes héritées du manager."
+        );
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, [month, syncInheritedDrafts, token, year]);
+
+  const pendingRows = useMemo(
+    () =>
+      (primeRows ?? []).filter(
+        (row) =>
+          row.employee.role === "employee" &&
+          row.calculation?.calculationVersion === 2 &&
+          row.calculation.status === "BROUILLON"
+      ),
+    [primeRows]
+  );
+  const confirmedRows = useMemo(
+    () =>
+      (primeRows ?? []).filter(
+        (row) =>
+          row.employee.role === "employee" &&
+          row.calculation?.calculationVersion === 2 &&
+          row.calculation.status === "CONFIRME"
+      ),
+    [primeRows]
+  );
+  const pendingTotal = pendingRows.reduce(
+    (sum, row) => sum + (row.calculation?.totalAmount ?? 0),
+    0
+  );
+  const confirmedTotal = confirmedRows.reduce(
+    (sum, row) => sum + (row.calculation?.totalAmount ?? 0),
+    0
   );
 
-  const evaluationRows = useMemo(() => {
-    return (monthRows ?? []).filter(
-      (row) => (row.employee.bonusType ?? "FIXED") !== "PERCENTAGE"
-    );
-  }, [monthRows]);
-
-  useEffect(() => {
-    setPrimeDrafts({});
-    setCommercialDrafts({});
-  }, [month, year]);
-
-  useEffect(() => {
-    if (!evaluationRows.length) return;
-    setPrimeDrafts((prev) => {
-      const next: Record<string, PrimeDraft> = { ...prev };
-      for (const row of evaluationRows) {
-        if (next[row.employee._id]) continue;
-        const base =
-          row.evaluation.baseBonus ?? row.employee.baseBonus ?? 0;
-        const pct = row.evaluation.percentage || 0;
-        const computed =
-          row.evaluation.status === "CONFIRME"
-            ? row.evaluation.computedBonus || 0
-            : pct > 0
-              ? Math.round((base * pct) / 100)
-              : 0;
-        next[row.employee._id] = {
-          baseBonus: String(base),
-          computedBonus: String(computed),
-        };
-      }
-      return next;
-    });
-  }, [evaluationRows]);
-
-  useEffect(() => {
-    if (!commercialRows) return;
-    setCommercialDrafts((prev) => {
-      const next: Record<string, string> = { ...prev };
-      for (const row of commercialRows) {
-        const id = row.employee._id;
-        if (next[id] !== undefined) continue;
-        if (row.calculation) {
-          next[id] = String(row.calculation.totalAmount ?? 0);
-        }
-      }
-      return next;
-    });
-  }, [commercialRows]);
-
-  const pendingEvalPrimes = useMemo(() => {
-    return evaluationRows.filter(
-      (row) => row.evaluation.status === "EN_ATTENTE" && row.evaluation.reportId
-    );
-  }, [evaluationRows]);
-
-  const pendingCommercial = useMemo(() => {
-    return (commercialRows ?? []).filter((row) => {
-      if (row.calculation?.status !== "BROUILLON") return false;
-      const draftAmount = Number(commercialDrafts[row.employee._id]);
-      const amount =
-        Number.isFinite(draftAmount) && commercialDrafts[row.employee._id] !== undefined
-          ? draftAmount
-          : row.calculation?.totalAmount ?? 0;
-      return amount > 0;
-    });
-  }, [commercialRows, commercialDrafts]);
-
-  const totalPendingPrimes = useMemo(() => {
-    const evalTotal = pendingEvalPrimes.reduce((sum, row) => {
-      const draft = primeDrafts[row.employee._id];
-      return sum + (Number(draft?.computedBonus) || 0);
-    }, 0);
-    const commercialTotal = pendingCommercial.reduce((sum, row) => {
-      const draft = commercialDrafts[row.employee._id];
-      return (
-        sum +
-        (Number(draft) || row.calculation?.totalAmount || 0)
-      );
-    }, 0);
-    return evalTotal + commercialTotal;
-  }, [
-    pendingEvalPrimes,
-    pendingCommercial,
-    primeDrafts,
-    commercialDrafts,
-  ]);
-
-  const pendingCount = pendingEvalPrimes.length + pendingCommercial.length;
-
-  const confirmedEval = useMemo(() => {
-    return evaluationRows.filter((row) => row.evaluation.status === "CONFIRME");
-  }, [evaluationRows]);
-
-  const confirmedCommercial = useMemo(() => {
-    return (commercialRows ?? []).filter(
-      (row) => row.calculation?.status === "CONFIRME"
-    );
-  }, [commercialRows]);
-
-  const definedPrimeTotal = useMemo(() => {
-    const evalTotal = confirmedEval.reduce(
-      (sum, row) => sum + (row.evaluation.computedBonus || 0),
-      0
-    );
-    const commercialTotal = confirmedCommercial.reduce(
-      (sum, row) => sum + (row.calculation?.totalAmount ?? 0),
-      0
-    );
-    return evalTotal + commercialTotal;
-  }, [confirmedEval, confirmedCommercial]);
-
-  function updatePrimeBase(
-    employeeId: string,
-    value: string,
-    percentage: number
-  ) {
-    const base = Number(value) || 0;
-    const computed =
-      percentage > 0 ? Math.round((base * percentage) / 100) : 0;
-    setPrimeDrafts((prev) => ({
-      ...prev,
-      [employeeId]: {
-        baseBonus: value,
-        computedBonus: String(computed),
-      },
-    }));
-  }
-
-  function updatePrimeComputed(employeeId: string, value: string) {
-    setPrimeDrafts((prev) => ({
-      ...prev,
-      [employeeId]: {
-        baseBonus: prev[employeeId]?.baseBonus ?? "0",
-        computedBonus: value,
-      },
-    }));
-  }
-
-  async function onSavePrimeBases() {
-    if (!token || !evaluationRows.length) return;
+  async function onConfirmPrimes() {
+    if (!token || pendingRows.length === 0) return;
     setBusy(true);
     setError("");
     setMsg("");
     try {
-      let saved = 0;
-      for (const row of evaluationRows) {
-        const draft = primeDrafts[row.employee._id];
-        if (!draft) continue;
-        await setBaseBonus({
-          token,
-          userId: row.employee._id as Id<"users">,
-          baseBonus: Number(draft.baseBonus) || 0,
-        });
-        saved += 1;
-      }
-      setMsg(`${saved} prime(s) de base enregistrée(s)`);
+      const result = await confirmPrimes({
+        token,
+        calculationIds: pendingRows.map(
+          (row) => row.calculation!._id
+        ),
+      });
+      setMsg(
+        `${result.confirmed} prime(s) confirmée(s) et créditée(s) pour ${month}/${year}.`
+      );
     } catch (err) {
       setError(err instanceof Error ? err.message : "Erreur");
     } finally {
@@ -230,6 +116,7 @@ export default function AdminPrimesPage() {
     e.preventDefault();
     if (!token || !bonusEmployeeId) return;
     setError("");
+    setMsg("");
     try {
       await grantBonus({
         token,
@@ -238,7 +125,7 @@ export default function AdminPrimesPage() {
         title: bonusTitle,
         reason: bonusReason,
       });
-      setMsg("Prime attribuée");
+      setMsg("Prime exceptionnelle attribuée");
       setBonusAmount("");
       setBonusReason("");
     } catch (err) {
@@ -246,76 +133,13 @@ export default function AdminPrimesPage() {
     }
   }
 
-  async function onConfirmPrimes() {
-    if (!token || pendingCount === 0) return;
-    setBusy(true);
-    setError("");
-    setMsg("");
-    try {
-      let evalConfirmed = 0;
-      let commercialConfirmed = 0;
-
-      if (pendingEvalPrimes.length > 0) {
-        const entries = pendingEvalPrimes.map((row) => {
-          const draft = primeDrafts[row.employee._id];
-          return {
-            reportId: row.evaluation.reportId as Id<"monthlyReports">,
-            baseBonus: Number(draft?.baseBonus) || 0,
-            computedBonus: Number(draft?.computedBonus) || 0,
-          };
-        });
-        const result = await confirmPrimesBatch({
-          token,
-          month,
-          year,
-          entries,
-        });
-        evalConfirmed = result.confirmed;
-      }
-
-      if (pendingCommercial.length > 0) {
-        const entries = pendingCommercial.map((row) => ({
-          calculationId: row.calculation!._id,
-          totalAmount:
-            Number(commercialDrafts[row.employee._id]) ||
-            row.calculation?.totalAmount ||
-            0,
-        }));
-        const result = await confirmCommercialBatch({
-          token,
-          entries,
-        });
-        commercialConfirmed = result.confirmed;
-      }
-
-      const parts = [];
-      if (evalConfirmed > 0) {
-        parts.push(`${evalConfirmed} évaluation`);
-      }
-      if (commercialConfirmed > 0) {
-        parts.push(`${commercialConfirmed} commerciale`);
-      }
-      setMsg(
-        parts.length
-          ? `Primes confirmées : ${parts.join(" · ")} (${month}/${year}) — créditées au solde employé`
-          : "Aucune prime confirmée"
-      );
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Erreur");
-    } finally {
-      setBusy(false);
-    }
-  }
-
   return (
     <RequireAuth role="admin">
       <PageShell
         title="Primes"
-        description="Confirmez les primes d'évaluation et les primes commerciales du mois. Une fois confirmées, elles apparaissent dans le solde de l'employé."
+        description="Vérifiez et confirmez les primes calculées selon la base, la réalisation, le recouvrement et l’évaluation de chaque employé."
       >
-        {msg ? (
-          <p className="mb-4 text-sm text-emerald-600">{msg}</p>
-        ) : null}
+        {msg ? <p className="mb-4 text-sm text-emerald-600">{msg}</p> : null}
         {error ? <p className="mb-4 text-sm text-red-600">{error}</p> : null}
 
         <div className="mb-4 flex flex-wrap gap-3">
@@ -347,11 +171,14 @@ export default function AdminPrimesPage() {
         <Card className="mb-6">
           <div>
             <h2 className="font-semibold text-zinc-900">
-              Primes du mois
+              Calculs à confirmer
             </h2>
             <p className="mt-1 text-sm text-zinc-500">
-              Évaluation et commerciale. Vous pouvez modifier la prime calculée
-              avant confirmation.
+              Les primes héritées utilisent les objectifs et résultats du lieu
+              de travail lorsqu&apos;ils sont enregistrés; sinon, elles
+              reprennent ceux du manager. Le recouvrement du lieu s&apos;applique
+              uniquement au département « resposible showroom ». Ces calculs
+              sont préparés automatiquement.
             </p>
           </div>
 
@@ -360,209 +187,90 @@ export default function AdminPrimesPage() {
               <thead className="text-xs uppercase text-zinc-500">
                 <tr>
                   <th className="pb-3 pr-3 text-left">Employé</th>
-                  <th className="pb-3 pr-3 text-left">Type</th>
-                  <th className="pb-3 pr-3 text-left">Prime de base</th>
-                  <th className="pb-3 pr-3 text-left">Détail</th>
-                  <th className="pb-3 pr-3 text-left">Prime calculée</th>
-                  <th className="pb-3 text-left">Statut</th>
+                  <th className="pb-3 pr-3 text-left">Données</th>
+                  <th className="pb-3 pr-3 text-right">Prime de base</th>
+                  <th className="pb-3 pr-3 text-right">Réalisation</th>
+                  <th className="pb-3 pr-3 text-right">Recouvrement</th>
+                  <th className="pb-3 pr-3 text-right">Évaluation</th>
+                  <th className="pb-3 pr-3 text-right">Prime calculée</th>
                 </tr>
               </thead>
               <tbody>
-                {evaluationRows.map((row) => {
-                  const draft = primeDrafts[row.employee._id] ?? {
-                    baseBonus: "0",
-                    computedBonus: "0",
-                  };
-                  const pct = row.evaluation.percentage || 0;
-                  const pending = row.evaluation.status === "EN_ATTENTE";
-                  const confirmed = row.evaluation.status === "CONFIRME";
+                {pendingRows.map((row) => {
+                  const calc = row.calculation!;
                   return (
                     <tr
-                      key={`eval-${row.employee._id}`}
-                      className={`border-t border-zinc-100 ${
-                        pending ? "bg-amber-50/40" : ""
-                      }`}
+                      key={calc._id}
+                      className="border-t border-zinc-100"
                     >
-                      <td className="py-3 pr-3">
-                        <p className="font-medium text-zinc-900">
-                          {row.employee.name}
-                        </p>
-                        <p className="text-xs text-zinc-500">
-                          {row.employee.department || "—"}
-                        </p>
+                      <td className="py-3 pr-3 font-medium text-zinc-900">
+                        {row.employee.name}
                       </td>
                       <td className="py-3 pr-3">
-                        <Badge className="bg-zinc-100 text-zinc-700">
-                          Évaluation
-                        </Badge>
-                      </td>
-                      <td className="py-3 pr-3">
-                        <input
-                          type="number"
-                          min={0}
-                          disabled={confirmed}
-                          className="w-28 rounded-lg border border-zinc-200 px-2 py-1.5 disabled:bg-zinc-50"
-                          value={draft.baseBonus}
-                          onChange={(e) =>
-                            updatePrimeBase(
-                              row.employee._id,
-                              e.target.value,
-                              pct
-                            )
-                          }
-                        />
-                      </td>
-                      <td className="py-3 pr-3 text-zinc-700">
-                        {pct ? `Éval. ${pct}%` : "—"}
-                      </td>
-                      <td className="py-3 pr-3">
-                        {pct || pending || confirmed ? (
-                          <input
-                            type="number"
-                            min={0}
-                            disabled={confirmed}
-                            className="w-28 rounded-lg border border-zinc-200 px-2 py-1.5 disabled:bg-zinc-50"
-                            value={draft.computedBonus}
-                            onChange={(e) =>
-                              updatePrimeComputed(
-                                row.employee._id,
-                                e.target.value
-                              )
-                            }
-                          />
-                        ) : (
-                          <span className="text-zinc-400">—</span>
-                        )}
-                      </td>
-                      <td className="py-3">
-                        {pending ? (
-                          <Badge className="bg-amber-100 text-amber-800">
-                            En attente
+                        {calc.hasOwnMetrics ? (
+                          <Badge className="bg-sky-100 text-sky-800">
+                            Individuelles
                           </Badge>
-                        ) : confirmed ? (
-                          <Badge className="bg-emerald-50 text-emerald-700">
-                            Confirmée
+                        ) : calc.sourceWorkplaceId ? (
+                          <Badge className="bg-emerald-100 text-emerald-800">
+                            Lieu : {row.workplaceName || "—"}
                           </Badge>
                         ) : (
-                          <span className="text-zinc-400">—</span>
+                          <Badge className="bg-zinc-100 text-zinc-700">
+                            Manager : {row.managerName || "—"}
+                          </Badge>
                         )}
+                      </td>
+                      <td className="py-3 pr-3 text-right">
+                        {moneyDZD(calc.primeBase)}
+                      </td>
+                      <td className="py-3 pr-3 text-right">
+                        {(calc.objectiveRatio * 100).toFixed(1)}% ·{" "}
+                        {moneyDZD(calc.objectiveAmount)}
+                      </td>
+                      <td className="py-3 pr-3 text-right">
+                        {calc.hasOwnMetrics ||
+                        (calc.sourceWorkplaceId && row.usesWorkplaceRecovery)
+                          ? `${(calc.recoveryRatio * 100).toFixed(1)}% · ${moneyDZD(calc.recoveryAmount)}`
+                          : "—"}
+                      </td>
+                      <td className="py-3 pr-3 text-right">
+                        {calc.evaluationPercent}% ·{" "}
+                        {moneyDZD(calc.evaluationAmount)}
+                      </td>
+                      <td className="py-3 pr-3 text-right font-semibold">
+                        {moneyDZD(calc.totalAmount)}
                       </td>
                     </tr>
                   );
                 })}
-
-                {(commercialRows ?? []).map((row) => {
-                  const calc = row.calculation;
-                  const pending = calc?.status === "BROUILLON";
-                  const confirmed = calc?.status === "CONFIRME";
-                  const draftAmount =
-                    commercialDrafts[row.employee._id] ??
-                    String(calc?.totalAmount ?? "");
-                  return (
-                    <tr
-                      key={`com-${row.employee._id}`}
-                      className={`border-t border-zinc-100 ${
-                        pending ? "bg-sky-50/50" : ""
-                      }`}
-                    >
-                      <td className="py-3 pr-3">
-                        <p className="font-medium text-zinc-900">
-                          {row.employee.name}
-                        </p>
-                        <p className="text-xs text-zinc-500">
-                          {row.employee.department || "—"} ·{" "}
-                          {row.employee.bonusPercent ?? 0}%
-                        </p>
-                      </td>
-                      <td className="py-3 pr-3">
-                        <Badge className="bg-sky-100 text-sky-800">
-                          Commerciale
-                        </Badge>
-                      </td>
-                      <td className="py-3 pr-3 text-zinc-700">
-                        {calc ? moneyDZD(calc.primeBase) : "—"}
-                      </td>
-                      <td className="py-3 pr-3 text-xs text-zinc-600">
-                        {calc ? (
-                          <>
-                            Obj {(calc.objectiveRatio * 100).toFixed(0)}% · Rec{" "}
-                            {(calc.recoveryRatio * 100).toFixed(0)}% · Éval{" "}
-                            {calc.evaluationPercent}%
-                          </>
-                        ) : (
-                          <span className="text-zinc-400">
-                            À calculer sur Calcul des primes
-                          </span>
-                        )}
-                      </td>
-                      <td className="py-3 pr-3">
-                        {calc ? (
-                          <input
-                            type="number"
-                            min={0}
-                            disabled={confirmed}
-                            className="w-28 rounded-lg border border-zinc-200 px-2 py-1.5 disabled:bg-zinc-50"
-                            value={draftAmount}
-                            onChange={(e) =>
-                              setCommercialDrafts((prev) => ({
-                                ...prev,
-                                [row.employee._id]: e.target.value,
-                              }))
-                            }
-                          />
-                        ) : (
-                          <span className="text-zinc-400">—</span>
-                        )}
-                      </td>
-                      <td className="py-3">
-                        {pending ? (
-                          <Badge className="bg-amber-100 text-amber-800">
-                            En attente
-                          </Badge>
-                        ) : confirmed ? (
-                          <Badge className="bg-emerald-50 text-emerald-700">
-                            Confirmée
-                          </Badge>
-                        ) : (
-                          <span className="text-zinc-400">—</span>
-                        )}
-                      </td>
-                    </tr>
-                  );
-                })}
+                {!pendingRows.length ? (
+                  <tr>
+                    <td colSpan={7} className="py-6 text-sm text-zinc-500">
+                      Aucune prime en attente. Enregistrez les données du lieu
+                      de travail ou du manager dans Calcul des primes; les
+                      employés concernés seront ajoutés automatiquement.
+                    </td>
+                  </tr>
+                ) : null}
               </tbody>
             </table>
-            {!evaluationRows.length && !commercialRows?.length ? (
-              <p className="py-6 text-sm text-zinc-500">
-                Aucun employé à afficher.
-              </p>
-            ) : null}
           </div>
 
-          <div className="mt-4 flex flex-col gap-3 border-t border-zinc-100 pt-4 sm:flex-row sm:items-center sm:justify-between">
+          <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-zinc-100 pt-4">
             <p className="text-sm text-zinc-600">
-              {pendingCount > 0
-                ? `${pendingCount} prime(s) en attente · estimé ${moneyDZD(totalPendingPrimes)}`
-                : "Aucune prime en attente pour ce mois"}
+              {pendingRows.length} prime(s) en attente ·{" "}
+              {moneyDZD(pendingTotal)}
             </p>
-            <div className="flex flex-wrap gap-2">
-              <SecondaryButton
-                type="button"
-                disabled={busy || !evaluationRows.length}
-                onClick={() => void onSavePrimeBases()}
-              >
-                Enregistrer primes de base
-              </SecondaryButton>
-              <PrimaryButton
-                type="button"
-                disabled={busy || pendingCount === 0}
-                onClick={() => void onConfirmPrimes()}
-              >
-                {busy
-                  ? "Confirmation…"
-                  : `Confirmer les primes (${month}/${year})`}
-              </PrimaryButton>
-            </div>
+            <PrimaryButton
+              type="button"
+              disabled={busy || pendingRows.length === 0}
+              onClick={() => void onConfirmPrimes()}
+            >
+              {busy
+                ? "Confirmation…"
+                : `Confirmer les primes (${month}/${year})`}
+            </PrimaryButton>
           </div>
         </Card>
 
@@ -575,88 +283,56 @@ export default function AdminPrimesPage() {
                 year: "numeric",
               })}
             </h2>
-            <p className="mt-1 text-sm text-zinc-500">
-              Primes d&apos;évaluation et commerciales créditées au solde.
-            </p>
           </div>
           <div className="overflow-x-auto">
             <table className="min-w-full text-sm">
               <thead className="text-xs uppercase text-zinc-500">
                 <tr>
                   <th className="pb-3 pr-3 text-left">Employé</th>
-                  <th className="pb-3 pr-3 text-left">Type</th>
-                  <th className="pb-3 pr-3 text-left">Détail</th>
+                  <th className="pb-3 pr-3 text-left">Données</th>
+                  <th className="pb-3 pr-3 text-left">Évaluation</th>
                   <th className="pb-3 text-right">Prime</th>
                 </tr>
               </thead>
               <tbody>
-                {confirmedEval.map((row) => (
+                {confirmedRows.map((row) => (
                   <tr
-                    key={`eval-ok-${row.employee._id}`}
+                    key={row.calculation!._id}
                     className="border-t border-zinc-100"
                   >
                     <td className="py-3 pr-3 font-medium text-zinc-900">
                       {row.employee.name}
                     </td>
                     <td className="py-3 pr-3">
-                      <Badge className="bg-zinc-100 text-zinc-700">
-                        Évaluation
-                      </Badge>
-                    </td>
-                    <td className="py-3 pr-3 text-zinc-700">
-                      {row.evaluation.percentage
-                        ? `${row.evaluation.percentage}%`
-                        : "—"}
-                    </td>
-                    <td className="py-3 text-right font-semibold text-zinc-900">
-                      {moneyDZD(row.evaluation.computedBonus || 0)}
-                    </td>
-                  </tr>
-                ))}
-                {confirmedCommercial.map((row) => (
-                  <tr
-                    key={`com-ok-${row.employee._id}`}
-                    className="border-t border-zinc-100"
-                  >
-                    <td className="py-3 pr-3 font-medium text-zinc-900">
-                      {row.employee.name}
+                      {row.calculation!.hasOwnMetrics
+                        ? "Calcul individuel"
+                        : row.calculation!.sourceWorkplaceId
+                          ? `Objectif / réalisation du lieu ${row.workplaceName}`
+                          : `Objectif / réalisation du manager ${row.managerName}`}
                     </td>
                     <td className="py-3 pr-3">
-                      <Badge className="bg-sky-100 text-sky-800">
-                        Commerciale
-                      </Badge>
+                      {row.calculation!.evaluationPercent}%
                     </td>
-                    <td className="py-3 pr-3 text-xs text-zinc-600">
-                      Obj{" "}
-                      {(
-                        (row.calculation?.objectiveRatio ?? 0) * 100
-                      ).toFixed(0)}
-                      % · Rec{" "}
-                      {(
-                        (row.calculation?.recoveryRatio ?? 0) * 100
-                      ).toFixed(0)}
-                      % · Éval {row.calculation?.evaluationPercent ?? 0}%
-                    </td>
-                    <td className="py-3 text-right font-semibold text-zinc-900">
-                      {moneyDZD(row.calculation?.totalAmount ?? 0)}
+                    <td className="py-3 text-right font-semibold">
+                      {moneyDZD(row.calculation!.totalAmount)}
                     </td>
                   </tr>
                 ))}
-                {confirmedEval.length + confirmedCommercial.length > 0 ? (
+                {confirmedRows.length > 0 ? (
                   <tr className="border-t-2 border-zinc-300 bg-zinc-50 font-semibold">
                     <td className="py-3 pr-3" colSpan={3}>
-                      Total primes
+                      Total des primes calculées
                     </td>
                     <td className="py-3 text-right">
-                      {moneyDZD(definedPrimeTotal)}
+                      {moneyDZD(confirmedTotal)}
                     </td>
                   </tr>
                 ) : null}
               </tbody>
             </table>
-            {!confirmedEval.length && !confirmedCommercial.length ? (
+            {!confirmedRows.length ? (
               <p className="py-6 text-sm text-zinc-500">
-                Aucune prime confirmée pour ce mois.
+                Aucune prime calculée confirmée pour ce mois.
               </p>
             ) : null}
           </div>
@@ -676,10 +352,10 @@ export default function AdminPrimesPage() {
               >
                 <option value="">Choisir…</option>
                 {(employees ?? [])
-                  .filter((e) => e.isActive)
-                  .map((e) => (
-                    <option key={e._id} value={e._id}>
-                      {e.name}
+                  .filter((employee) => employee.isActive)
+                  .map((employee) => (
+                    <option key={employee._id} value={employee._id}>
+                      {employee.name}
                     </option>
                   ))}
               </select>
@@ -696,6 +372,7 @@ export default function AdminPrimesPage() {
               <input
                 required
                 type="number"
+                min={0}
                 className={inputClass}
                 value={bonusAmount}
                 onChange={(e) => setBonusAmount(e.target.value)}
@@ -719,19 +396,19 @@ export default function AdminPrimesPage() {
         <h3 className="mb-3 font-semibold text-zinc-900">Primes attribuées</h3>
         <Card>
           <div className="space-y-3">
-            {(bonuses ?? []).map((b) => (
+            {(bonuses ?? []).map((bonus) => (
               <div
-                key={b._id}
+                key={bonus._id}
                 className="flex items-center justify-between gap-3 border-b border-zinc-100 pb-3 last:border-0"
               >
                 <div>
                   <p className="font-medium">
-                    {b.employee.name} · {b.title}
+                    {bonus.employee.name} · {bonus.title}
                   </p>
-                  <p className="text-sm text-zinc-500">{b.reason}</p>
+                  <p className="text-sm text-zinc-500">{bonus.reason}</p>
                 </div>
                 <p className="font-semibold text-[#0088E8]">
-                  {moneyDZD(b.amount)}
+                  {moneyDZD(bonus.amount)}
                 </p>
               </div>
             ))}

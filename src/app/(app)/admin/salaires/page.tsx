@@ -17,7 +17,6 @@ import { formatDate, moneyDZD } from "@/lib/format";
 
 type SalaryDraft = {
   baseSalary: string;
-  lateDeductions: string;
 };
 
 function monthAmountFromDraft(
@@ -69,9 +68,6 @@ export default function AdminSalairesPage() {
             row.employee.baseSalary ??
             0
         ),
-        lateDeductions: String(
-          row.salary?.lateDeductions ?? row.attendanceLateDeductions
-        ),
       };
     }
     setSalaryDrafts(nextSalaries);
@@ -90,12 +86,8 @@ export default function AdminSalairesPage() {
       const draft = salaryDrafts[row.employee._id];
       const contractual = Number(draft?.baseSalary) || 0;
       const monthPay = monthAmountFromDraft(contractual, row.proration);
-      const late =
-        draft?.lateDeductions !== undefined
-          ? Number(draft.lateDeductions) || 0
-          : row.attendanceLateDeductions;
       const leave = leaveDeductionByEmployee[row.employee._id] ?? 0;
-      return sum + Math.max(0, monthPay - late - leave);
+      return sum + Math.max(0, monthPay - leave);
     }, 0);
   }, [monthRows, salaryDrafts, leaveDeductionByEmployee]);
 
@@ -106,24 +98,18 @@ export default function AdminSalairesPage() {
   const definedSalaryTotal = useMemo(() => {
     return definedSalaries.reduce((sum, row) => {
       const base = row.salary?.baseSalary ?? 0;
-      const late = row.salary?.lateDeductions ?? 0;
       const leave = row.salary?.leaveDeductions ?? 0;
-      return sum + (row.salary?.netPay ?? Math.max(0, base - late - leave));
+      return sum + Math.max(0, base - leave);
     }, 0);
   }, [definedSalaries]);
 
   function updateSalaryDraft(
     employeeId: string,
-    field: keyof SalaryDraft,
     value: string
   ) {
     setSalaryDrafts((prev) => ({
       ...prev,
-      [employeeId]: {
-        baseSalary: prev[employeeId]?.baseSalary ?? "0",
-        lateDeductions: prev[employeeId]?.lateDeductions ?? "0",
-        [field]: value,
-      },
+      [employeeId]: { baseSalary: value },
     }));
   }
 
@@ -137,12 +123,10 @@ export default function AdminSalairesPage() {
       const entries = monthRows.map((row) => {
         const draft = salaryDrafts[row.employee._id] ?? {
           baseSalary: "0",
-          lateDeductions: String(row.attendanceLateDeductions),
         };
         return {
           employeeId: row.employee._id as Id<"users">,
           baseSalary: Number(draft.baseSalary) || 0,
-          lateDeductions: Number(draft.lateDeductions) || 0,
         };
       });
 
@@ -153,7 +137,9 @@ export default function AdminSalairesPage() {
         entries,
       });
 
-      setMsg(`${result.saved} salaire(s) enregistré(s) pour ${month}/${year}`);
+      setMsg(
+        `${result.saved} salaire(s) enregistré(s) pour ${month}/${year}; le salaire de base des employés a été mis à jour comme valeur par défaut pour les prochains mois. ${result.paymentOrdersCreated} ordre(s) de salaire créé(s), ${result.paymentOrdersUpdated} mis à jour.`
+      );
     } catch (err) {
       setError(err instanceof Error ? err.message : "Erreur");
     } finally {
@@ -206,7 +192,8 @@ export default function AdminSalairesPage() {
             <p className="mt-1 text-sm text-zinc-500">
               Saisissez le salaire mensuel complet. Si l&apos;employé a commencé
               en cours de mois, seul le prorata (jours travaillés / jours du
-              mois) est crédité.
+              mois) est crédité. Après l&apos;enregistrement, ce montant devient
+              son salaire de base par défaut pour les prochains mois.
             </p>
           </div>
 
@@ -217,9 +204,13 @@ export default function AdminSalairesPage() {
                   <tr>
                     <th className="pb-3 pr-3 text-left">Employé</th>
                     <th className="pb-3 pr-3 text-left">Département</th>
-                    <th className="pb-3 pr-3 text-left">Salaire mensuel</th>
+                    <th className="pb-3 pr-3 text-left">
+                      Salaire mensuel
+                      <span className="mt-1 block text-[10px] font-normal normal-case text-zinc-400">
+                        Définit le salaire de base par défaut
+                      </span>
+                    </th>
                     <th className="pb-3 pr-3 text-left">Prorata mois</th>
-                    <th className="pb-3 pr-3 text-left">Retards</th>
                     <th className="pb-3 pr-3 text-left">Congés non payés</th>
                     <th className="pb-3 text-left">Net</th>
                   </tr>
@@ -228,7 +219,6 @@ export default function AdminSalairesPage() {
                   {(monthRows ?? []).map((row) => {
                     const draft = salaryDrafts[row.employee._id] ?? {
                       baseSalary: "0",
-                      lateDeductions: String(row.attendanceLateDeductions),
                     };
                     const contractual = Number(draft.baseSalary) || 0;
                     const monthPay = monthAmountFromDraft(
@@ -237,12 +227,7 @@ export default function AdminSalairesPage() {
                     );
                     const leaveDed =
                       leaveDeductionByEmployee[row.employee._id] ?? 0;
-                    const net = Math.max(
-                      0,
-                      monthPay -
-                        (Number(draft.lateDeductions) || 0) -
-                        leaveDed
-                    );
+                    const net = Math.max(0, monthPay - leaveDed);
                     return (
                       <tr
                         key={row.employee._id}
@@ -273,7 +258,6 @@ export default function AdminSalairesPage() {
                             onChange={(e) =>
                               updateSalaryDraft(
                                 row.employee._id,
-                                "baseSalary",
                                 e.target.value
                               )
                             }
@@ -294,21 +278,6 @@ export default function AdminSalairesPage() {
                               {row.proration.daysInMonth} j — mois complet
                             </p>
                           )}
-                        </td>
-                        <td className="py-3 pr-3">
-                          <input
-                            type="number"
-                            min={0}
-                            className="w-28 rounded-lg border border-zinc-200 px-2 py-1.5"
-                            value={draft.lateDeductions}
-                            onChange={(e) =>
-                              updateSalaryDraft(
-                                row.employee._id,
-                                "lateDeductions",
-                                e.target.value
-                              )
-                            }
-                          />
                         </td>
                         <td className="py-3 pr-3 text-zinc-700">
                           {moneyDZD(leaveDed)}
@@ -363,7 +332,6 @@ export default function AdminSalairesPage() {
                   <th className="pb-3 pr-3 text-left">Département</th>
                   <th className="pb-3 pr-3 text-right">Mensuel</th>
                   <th className="pb-3 pr-3 text-right">Crédit mois</th>
-                  <th className="pb-3 pr-3 text-right">Retards</th>
                   <th className="pb-3 pr-3 text-right">Congés</th>
                   <th className="pb-3 text-right">Net</th>
                 </tr>
@@ -375,11 +343,8 @@ export default function AdminSalairesPage() {
                     row.salary?.contractualSalary ??
                     row.employee.baseSalary ??
                     monthPay;
-                  const late = row.salary?.lateDeductions ?? 0;
                   const leave = row.salary?.leaveDeductions ?? 0;
-                  const net =
-                    row.salary?.netPay ??
-                    Math.max(0, monthPay - late - leave);
+                  const net = Math.max(0, monthPay - leave);
                   const daysNote =
                     row.salary?.daysWorked != null &&
                     row.salary?.daysInMonth != null &&
@@ -409,9 +374,6 @@ export default function AdminSalairesPage() {
                         ) : null}
                       </td>
                       <td className="py-3 pr-3 text-right text-zinc-700">
-                        {moneyDZD(late)}
-                      </td>
-                      <td className="py-3 pr-3 text-right text-zinc-700">
                         {moneyDZD(leave)}
                       </td>
                       <td className="py-3 text-right font-semibold text-zinc-900">
@@ -422,7 +384,7 @@ export default function AdminSalairesPage() {
                 })}
                 {definedSalaries.length > 0 ? (
                   <tr className="border-t-2 border-zinc-300 bg-zinc-50 font-semibold">
-                    <td className="py-3 pr-3" colSpan={6}>
+                    <td className="py-3 pr-3" colSpan={5}>
                       Total masse nette
                     </td>
                     <td className="py-3 text-right">

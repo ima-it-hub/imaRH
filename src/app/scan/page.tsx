@@ -186,7 +186,7 @@ export default function PublicScanPage() {
               <div className="flex flex-col items-center text-center">
                 <div className="rounded-2xl bg-[#fafafa] p-4 ring-1 ring-zinc-100">
                   <Image
-                    src="/ima-logo.jpg"
+                    src="/IMA-LOGO2.png"
                     alt="IMA Plomberie"
                     width={220}
                     height={120}

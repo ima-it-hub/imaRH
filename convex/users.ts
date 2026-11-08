@@ -69,11 +69,7 @@ export const create = mutation({
     managerId: v.optional(v.id("users")),
     phone: v.optional(v.string()),
     baseSalary: v.optional(v.number()),
-    bonusType: v.optional(
-      v.union(v.literal("FIXED"), v.literal("PERCENTAGE"))
-    ),
     baseBonus: v.optional(v.number()),
-    bonusPercent: v.optional(v.number()),
     annualLeaveQuota: v.optional(v.number()),
     /** Hire date as timestamp (ms). Defaults to now. */
     hireDate: v.optional(v.number()),
@@ -118,6 +114,9 @@ export const create = mutation({
     }
     if (args.role === "employee" && !args.workplaceId) {
       throw new Error("Chaque employé doit avoir un lieu de travail");
+    }
+    if (args.role === "employee" && (args.baseBonus ?? 0) <= 0) {
+      throw new Error("La prime de base de l'employé doit être supérieure à zéro");
     }
 
     let workplaceName = "";
@@ -210,18 +209,9 @@ export const create = mutation({
       annualLeaveBalance: quota,
       annualLeaveQuota: quota,
       baseSalary: args.baseSalary ?? 0,
-      bonusType:
-        args.role === "employee"
-          ? (args.bonusType ?? "FIXED")
-          : undefined,
-      baseBonus:
-        args.role === "employee" && (args.bonusType ?? "FIXED") === "FIXED"
-          ? args.baseBonus ?? 0
-          : 0,
-      bonusPercent:
-        args.role === "employee" && args.bonusType === "PERCENTAGE"
-          ? Math.max(0, args.bonusPercent ?? 0)
-          : 0,
+      bonusType: args.role === "employee" ? "FIXED" : undefined,
+      baseBonus: args.role === "employee" ? args.baseBonus : 0,
+      bonusPercent: 0,
       barcode,
       zktecoUserId,
     });
@@ -270,11 +260,7 @@ export const updateEmployee = mutation({
     managerId: v.optional(v.id("users")),
     phone: v.string(),
     baseSalary: v.number(),
-    bonusType: v.optional(
-      v.union(v.literal("FIXED"), v.literal("PERCENTAGE"))
-    ),
-    baseBonus: v.optional(v.number()),
-    bonusPercent: v.optional(v.number()),
+    baseBonus: v.number(),
     annualLeaveQuota: v.number(),
     annualLeaveBalance: v.number(),
     /** Hire date as timestamp (ms) */
@@ -371,6 +357,10 @@ export const updateEmployee = mutation({
     if (user.role === "employee" && !args.managerId && !user.managerId) {
       throw new Error("Chaque employé doit avoir un manager");
     }
+    const baseBonus = args.baseBonus;
+    if (user.role === "employee" && baseBonus <= 0) {
+      throw new Error("La prime de base de l'employé doit être supérieure à zéro");
+    }
 
     await ctx.db.patch(args.userId, {
       firstName,
@@ -385,10 +375,8 @@ export const updateEmployee = mutation({
         : {}),
       phone: args.phone.trim(),
       baseSalary: args.baseSalary,
-      ...(args.bonusType !== undefined ? { bonusType: args.bonusType } : {}),
-      ...(args.baseBonus !== undefined ? { baseBonus: args.baseBonus } : {}),
-      ...(args.bonusPercent !== undefined
-        ? { bonusPercent: Math.max(0, args.bonusPercent) }
+      ...(user.role === "employee"
+        ? { bonusType: "FIXED" as const, baseBonus, bonusPercent: 0 }
         : {}),
       annualLeaveQuota: args.annualLeaveQuota,
       annualLeaveBalance: args.annualLeaveBalance,
@@ -413,17 +401,17 @@ export const setBaseBonus = mutation({
   },
   handler: async (ctx, args) => {
     await requireAdmin(ctx, args.token);
-    if (args.baseBonus < 0) throw new Error("Prime de base invalide");
     const user = await ctx.db.get(args.userId);
     if (!user || user.role !== "employee") {
       throw new Error("Employé introuvable");
     }
+    if (args.baseBonus <= 0) {
+      throw new Error("La prime de base de l'employé doit être supérieure à zéro");
+    }
     await ctx.db.patch(args.userId, {
       baseBonus: args.baseBonus,
-      // Keep PERCENTAGE employees on commercial prime; only set FIXED when unset
-      ...((user.bonusType ?? "FIXED") === "PERCENTAGE"
-        ? {}
-        : { bonusType: "FIXED" as const }),
+      bonusType: "FIXED",
+      bonusPercent: 0,
     });
     return publicUser((await ctx.db.get(args.userId))!);
   },

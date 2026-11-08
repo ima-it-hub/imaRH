@@ -28,13 +28,19 @@ export default function FinancesPage() {
   const balance = useQuery(api.finances.myBalance, token ? { token } : "skip");
   const salaries = useQuery(api.finances.mySalaries, token ? { token } : "skip");
   const bonuses = useQuery(api.finances.myBonuses, token ? { token } : "skip");
+  const lateDeductions = useQuery(
+    api.finances.myLateDeductions,
+    token ? { token } : "skip"
+  );
   const orders = useQuery(
     api.finances.myPaymentOrders,
     token ? { token } : "skip"
   );
   const requestPayment = useMutation(api.finances.requestPayment);
 
-  const [tab, setTab] = useState<"salaires" | "primes" | "paiements">("paiements");
+  const [tab, setTab] = useState<
+    "salaires" | "primes" | "retards" | "paiements"
+  >("paiements");
   const [type, setType] = useState<"SALAIRE_MENSUEL" | "ACOMPTE" | "PRIME">(
     "ACOMPTE"
   );
@@ -45,6 +51,7 @@ export default function FinancesPage() {
   const [busy, setBusy] = useState(false);
 
   const available = balance?.available ?? 0;
+  const totalLateDeductions = balance?.totalLateDeductions ?? 0;
 
   async function onRequest(e: FormEvent) {
     e.preventDefault();
@@ -101,6 +108,7 @@ export default function FinancesPage() {
                   employeeName: user.name,
                   salaries: salaries ?? [],
                   bonuses: bonuses ?? [],
+                  lateDeductions: lateDeductions ?? [],
                   orders: orders ?? [],
                 });
               } catch (err) {
@@ -112,11 +120,11 @@ export default function FinancesPage() {
           </SecondaryButton>
         </div>
 
-        <div className="mb-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <div className="mb-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
           <StatCard
             label="Solde disponible"
             value={moneyDZD(available)}
-            hint="Salaires + primes − demandes en cours / payées"
+            hint="Inclut les primes à partir du troisième mois après leur attribution."
           />
           <StatCard
             label="Total salaires"
@@ -125,6 +133,14 @@ export default function FinancesPage() {
           <StatCard
             label="Total primes"
             value={moneyDZD(balance?.totalBonuses ?? 0)}
+          />
+          <StatCard
+            label="Retenues pour retards"
+            value={
+              totalLateDeductions > 0
+                ? `-${moneyDZD(totalLateDeductions)}`
+                : moneyDZD(0)
+            }
           />
           <StatCard
             label="Déjà demandé / payé"
@@ -138,6 +154,7 @@ export default function FinancesPage() {
               ["paiements", "Paiements"],
               ["salaires", "Salaires"],
               ["primes", "Primes"],
+              ["retards", "Retards"],
             ] as const
           ).map(([key, label]) => (
             <button
@@ -163,7 +180,7 @@ export default function FinancesPage() {
                   <tr>
                     <th className="pb-3 text-left">Période</th>
                     <th className="pb-3 text-left">Base</th>
-                    <th className="pb-3 text-left">Déductions</th>
+                    <th className="pb-3 text-left">Congés non payés</th>
                     <th className="pb-3 text-left">Net</th>
                   </tr>
                 </thead>
@@ -175,7 +192,7 @@ export default function FinancesPage() {
                       </td>
                       <td className="py-3">{moneyDZD(s.baseSalary)}</td>
                       <td className="py-3">
-                        {moneyDZD(s.lateDeductions ?? 0)}
+                        {moneyDZD(s.leaveDeductions ?? 0)}
                       </td>
                       <td className="py-3 font-medium">
                         {moneyDZD(s.netPay ?? s.baseSalary)}
@@ -191,6 +208,37 @@ export default function FinancesPage() {
           </Card>
         ) : null}
 
+        {tab === "retards" ? (
+          <Card>
+            <div className="space-y-3">
+              {(lateDeductions ?? []).map((row) => (
+                <div
+                  key={row._id}
+                  className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-red-100 px-4 py-3"
+                >
+                  <div>
+                    <p className="font-medium text-zinc-900">
+                      Retenue validée —{" "}
+                      {new Date(row.year, row.month - 1, 1).toLocaleString(
+                        "fr-DZ",
+                        { month: "long", year: "numeric" }
+                      )}
+                    </p>
+                  </div>
+                  <p className="text-lg font-semibold text-red-600">
+                    -{moneyDZD(row.amount)}
+                  </p>
+                </div>
+              ))}
+              {!lateDeductions?.length ? (
+                <p className="text-sm text-zinc-500">
+                  Aucune retenue pour retard.
+                </p>
+              ) : null}
+            </div>
+          </Card>
+        ) : null}
+
         {tab === "primes" ? (
           <Card>
             <div className="space-y-3">
@@ -201,10 +249,6 @@ export default function FinancesPage() {
                 >
                   <div>
                     <p className="font-medium text-zinc-900">{b.title}</p>
-                    <p className="text-sm text-zinc-500">{b.reason}</p>
-                    <p className="text-xs text-zinc-400">
-                      {formatDate(b.attributedAt)}
-                    </p>
                   </div>
                   <p className="text-lg font-semibold text-[#0088E8]">
                     {moneyDZD(b.amount)}

@@ -43,6 +43,16 @@ export const employeeHome = query({
     salaries.sort((a, b) =>
       a.year === b.year ? b.month - a.month : b.year - a.year
     );
+    const lastSalary = salaries[0]
+      ? {
+          ...salaries[0],
+          lateDeductions: 0,
+          netPay: Math.max(
+            0,
+            salaries[0].baseSalary - (salaries[0].leaveDeductions ?? 0)
+          ),
+        }
+      : null;
 
     const bonuses = await ctx.db
       .query("bonuses")
@@ -75,7 +85,7 @@ export const employeeHome = query({
       user: publicUser(user),
       todayAttendance,
       lateMinutes,
-      lastSalary: salaries[0] ?? null,
+      lastSalary,
       lastBonus: bonuses[0] ?? null,
       recentLeaves: leaves.slice(0, 5),
       recentPayments: payments.slice(0, 5),
@@ -171,14 +181,22 @@ export const navPendingBadges = query({
         await ctx.db.query("monthlyReports").collect()
       ).filter((r) => (r.status ?? "CONFIRME") === "EN_ATTENTE").length;
 
-      const pendingCommercialPrimes = (
+      const pendingPrimeRows = (
         await ctx.db
           .query("primeCalculations")
           .withIndex("by_status", (q) => q.eq("status", "BROUILLON"))
           .collect()
-      ).length;
+      );
+      let pendingCalculatedPrimes = 0;
+      for (const row of pendingPrimeRows) {
+        if (row.calculationVersion !== 2) continue;
+        const employee = await ctx.db.get(row.employeeId);
+        if (employee?.role === "employee" && !employee.resignedAt) {
+          pendingCalculatedPrimes += 1;
+        }
+      }
 
-      const pendingPrimes = pendingEvalPrimes + pendingCommercialPrimes;
+      const pendingPrimes = pendingCalculatedPrimes;
 
       if (pendingLeaves > 0) badges["admin-conges"] = pendingLeaves;
       if (pendingPayments > 0) badges["admin-ordres"] = pendingPayments;

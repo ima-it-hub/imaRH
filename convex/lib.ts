@@ -98,9 +98,7 @@ export function publicUser(user: Doc<"users">) {
     workplace: user.workplace ?? "",
     workplaceId: user.workplaceId ?? null,
     managerId: user.managerId ?? null,
-    bonusType: user.bonusType ?? "FIXED",
     baseBonus: user.baseBonus ?? 0,
-    bonusPercent: user.bonusPercent ?? 0,
     hireDate: user.hireDate ?? null,
     resignedAt: user.resignedAt ?? null,
     annualLeaveBalance: user.annualLeaveBalance ?? 0,
@@ -121,51 +119,51 @@ export function evaluationPercentage(
   return Math.round((sum / max) * 1000) / 10;
 }
 
-export function computeEvaluationBonus(baseBonus: number, percentage: number) {
-  if (baseBonus <= 0 || percentage <= 0) return 0;
-  return Math.round((baseBonus * percentage) / 100);
-}
-
-/**
- * Percentage-prime calculation:
- * primeBase = réalisation × employee%
- * objectif part = primeBase × weightObj% × (réalisation / objectif)  — >100% if exceeds
- * recouvrement part = primeBase × weightRec% × (recouvrement / objectif)
- * évaluation part = primeBase × weightEval% × (eval% / 100)
- */
-export function computePercentagePrime(args: {
+export function computeBasePrime(args: {
+  basePrime: number;
   realisation: number;
   objective: number;
   recouvrement: number;
-  employeeBonusPercent: number;
+  recoveryObjective: number;
   evaluationPercent: number;
-  objectiveWeightPercent: number;
-  recoveryWeightPercent: number;
-  evaluationWeightPercent: number;
+  applyRecoveryAdjustment: boolean;
 }) {
   const realisation = Math.max(0, args.realisation);
   const objective = Math.max(0, args.objective);
   const recouvrement = Math.max(0, args.recouvrement);
-  const employeeBonusPercent = Math.max(0, args.employeeBonusPercent);
+  const recoveryObjective = Math.max(0, args.recoveryObjective);
   const evaluationPercent = Math.max(0, Math.min(100, args.evaluationPercent));
-  const objectiveWeightPercent = Math.max(0, args.objectiveWeightPercent);
-  const recoveryWeightPercent = Math.max(0, args.recoveryWeightPercent);
-  const evaluationWeightPercent = Math.max(0, args.evaluationWeightPercent);
 
-  const primeBase = Math.round((realisation * employeeBonusPercent) / 100);
   const objectiveRatio = objective > 0 ? realisation / objective : 0;
-  const recoveryRatio = objective > 0 ? recouvrement / objective : 0;
-
-  const objectiveAmount = Math.round(
-    primeBase * (objectiveWeightPercent / 100) * objectiveRatio
-  );
-  const recoveryAmount = Math.round(
-    primeBase * (recoveryWeightPercent / 100) * recoveryRatio
-  );
+  const recoveryRatio =
+    recoveryObjective > 0 ? recouvrement / recoveryObjective : 0;
+  const primeBase = Math.max(0, args.basePrime);
+  const objectiveAmount = Math.round(primeBase * 0.8 * objectiveRatio);
   const evaluationAmount = Math.round(
-    primeBase * (evaluationWeightPercent / 100) * (evaluationPercent / 100)
+    primeBase * 0.2 * (evaluationPercent / 100)
   );
-  const totalAmount = objectiveAmount + recoveryAmount + evaluationAmount;
+  let recoveryAmount = 0;
+
+  // Apply the recovery shortfall/overachievement against the defined tiers.
+  if (args.applyRecoveryAdjustment && recoveryObjective > 0) {
+    if (recoveryRatio < 0.5) {
+      recoveryAmount = -primeBase * (1 - recoveryRatio) * 0.5;
+    } else if (recoveryRatio < 1) {
+      recoveryAmount = -primeBase * (1 - recoveryRatio) * 0.25;
+    } else if (recoveryRatio < 1.5) {
+      recoveryAmount = primeBase * (recoveryRatio - 1) * 0.25;
+    } else {
+      const cappedRatio = Math.min(recoveryRatio, 2);
+      recoveryAmount =
+        primeBase * (0.5 * 0.25 + (cappedRatio - 1.5) * 0.5);
+    }
+    recoveryAmount = Math.round(recoveryAmount);
+  }
+
+  const totalAmount = Math.max(
+    0,
+    objectiveAmount + evaluationAmount + recoveryAmount
+  );
 
   return {
     primeBase,
@@ -176,10 +174,10 @@ export function computePercentagePrime(args: {
     evaluationAmount,
     evaluationPercent,
     totalAmount,
-    objectiveWeightPercent,
-    recoveryWeightPercent,
-    evaluationWeightPercent,
-    employeeBonusPercent,
+    objectiveWeightPercent: 80,
+    recoveryWeightPercent: 0,
+    evaluationWeightPercent: 20,
+    employeeBonusPercent: 0,
   };
 }
 
@@ -355,8 +353,8 @@ export async function getSettings(ctx: QueryCtx | MutationCtx) {
       thursdayWorkEndMinute: existing.thursdayWorkEndMinute ?? 30,
       workingDaysPerMonth: existing.workingDaysPerMonth ?? 26,
       primeObjectiveWeightPercent: existing.primeObjectiveWeightPercent ?? 80,
-      primeRecoveryWeightPercent: existing.primeRecoveryWeightPercent ?? 10,
-      primeEvaluationWeightPercent: existing.primeEvaluationWeightPercent ?? 10,
+      primeRecoveryWeightPercent: existing.primeRecoveryWeightPercent ?? 0,
+      primeEvaluationWeightPercent: existing.primeEvaluationWeightPercent ?? 20,
     };
   }
 
@@ -374,8 +372,8 @@ export async function getSettings(ctx: QueryCtx | MutationCtx) {
     thursdayWorkEndMinute: 30,
     workingDaysPerMonth: 26,
     primeObjectiveWeightPercent: 80,
-    primeRecoveryWeightPercent: 10,
-    primeEvaluationWeightPercent: 10,
+    primeRecoveryWeightPercent: 0,
+    primeEvaluationWeightPercent: 20,
   };
 }
 
@@ -516,7 +514,7 @@ export function computeDelayMinutes(
   return Math.max(0, requiredMinutes - workedMinutes - toleranceMinutes);
 }
 
-/** Minute rate from monthly salary (same base as late deductions). */
+/** Minute rate from monthly salary used to calculate lateness penalties. */
 export function salaryMinuteRate(
   monthlySalary: number,
   requiredMinutesPerDay: number,

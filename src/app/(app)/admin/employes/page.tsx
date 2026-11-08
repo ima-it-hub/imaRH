@@ -45,9 +45,7 @@ export default function AdminEmployesPage() {
   const [workplaceId, setWorkplaceId] = useState("");
   const [managerId, setManagerId] = useState("");
   const [baseSalary, setBaseSalary] = useState("85000");
-  const [bonusType, setBonusType] = useState<"FIXED" | "PERCENTAGE">("FIXED");
   const [baseBonus, setBaseBonus] = useState("10000");
-  const [bonusPercent, setBonusPercent] = useState("2");
   const [annualLeaveQuota, setAnnualLeaveQuota] = useState("30");
   const [hireDate, setHireDate] = useState(todayISOLocal());
   const [zktecoUserId, setZktecoUserId] = useState("");
@@ -147,15 +145,7 @@ export default function AdminEmployesPage() {
             ? (managerId as Id<"users">)
             : undefined,
         baseSalary: Number(baseSalary) || 0,
-        bonusType: role === "employee" ? bonusType : undefined,
-        baseBonus:
-          role === "employee" && bonusType === "FIXED"
-            ? Number(baseBonus) || 0
-            : 0,
-        bonusPercent:
-          role === "employee" && bonusType === "PERCENTAGE"
-            ? Number(bonusPercent) || 0
-            : 0,
+        baseBonus: role === "employee" ? Number(baseBonus) || 0 : 0,
         annualLeaveQuota: Number(annualLeaveQuota) || 30,
         hireDate: hireDateToTimestamp(hireDate),
         zktecoUserId:
@@ -172,9 +162,7 @@ export default function AdminEmployesPage() {
       setDepartmentId("");
       setWorkplaceId("");
       setManagerId("");
-      setBonusType("FIXED");
       setBaseBonus("10000");
-      setBonusPercent("2");
       setHireDate(todayISOLocal());
       setZktecoUserId("");
     } catch (err) {
@@ -348,40 +336,16 @@ export default function AdminEmployesPage() {
                       ))}
                     </select>
                   </Field>
-                  <Field label="Type de prime">
-                    <select
+                  <Field label="Prime de base (DZD)">
+                    <input
+                      required
+                      type="number"
+                      min={1}
                       className={inputClass}
-                      value={bonusType}
-                      onChange={(e) =>
-                        setBonusType(e.target.value as "FIXED" | "PERCENTAGE")
-                      }
-                    >
-                      <option value="FIXED">Prime de base (DZD)</option>
-                      <option value="PERCENTAGE">Pourcentage (%)</option>
-                    </select>
+                      value={baseBonus}
+                      onChange={(e) => setBaseBonus(e.target.value)}
+                    />
                   </Field>
-                  {bonusType === "FIXED" ? (
-                    <Field label="Prime de base (DZD)">
-                      <input
-                        type="number"
-                        min={0}
-                        className={inputClass}
-                        value={baseBonus}
-                        onChange={(e) => setBaseBonus(e.target.value)}
-                      />
-                    </Field>
-                  ) : (
-                    <Field label="Pourcentage de prime (%)">
-                      <input
-                        type="number"
-                        min={0}
-                        step="0.01"
-                        className={inputClass}
-                        value={bonusPercent}
-                        onChange={(e) => setBonusPercent(e.target.value)}
-                      />
-                    </Field>
-                  )}
                 </>
               ) : null}
               <div className="grid grid-cols-2 gap-2">
@@ -509,9 +473,7 @@ export default function AdminEmployesPage() {
                         {u.department || "Sans département"}
                         {u.workplace ? ` · ${u.workplace}` : ""} ·{" "}
                         {moneyDZD(u.baseSalary)} ·{" "}
-                        {(u.bonusType ?? "FIXED") === "PERCENTAGE"
-                          ? `Prime ${u.bonusPercent ?? 0}%`
-                          : `Prime base ${moneyDZD(u.baseBonus)}`}{" "}
+                        Prime base {moneyDZD(u.baseBonus)}{" "}
                         · Solde congés {u.annualLeaveBalance}/
                         {u.annualLeaveQuota}
                         {u.hireDate
@@ -685,9 +647,7 @@ function EmployeeQuickEdit({
     managerId: Id<"users"> | null;
     phone: string;
     baseSalary: number;
-    bonusType?: "FIXED" | "PERCENTAGE";
     baseBonus: number;
-    bonusPercent?: number;
     annualLeaveQuota: number;
     annualLeaveBalance: number;
     hireDate?: number | null;
@@ -714,9 +674,7 @@ function EmployeeQuickEdit({
     managerId?: Id<"users">;
     phone: string;
     baseSalary: number;
-    bonusType?: "FIXED" | "PERCENTAGE";
-    baseBonus?: number;
-    bonusPercent?: number;
+    baseBonus: number;
     annualLeaveQuota: number;
     annualLeaveBalance: number;
     hireDate?: number;
@@ -732,9 +690,7 @@ function EmployeeQuickEdit({
     managerId: user.managerId ?? "",
     phone: user.phone,
     baseSalary: user.baseSalary,
-    bonusType: (user.bonusType ?? "FIXED") as "FIXED" | "PERCENTAGE",
     baseBonus: user.baseBonus,
-    bonusPercent: user.bonusPercent ?? 0,
     annualLeaveQuota: user.annualLeaveQuota,
     annualLeaveBalance: user.annualLeaveBalance,
     hireDate: hireDateInputValue(user.hireDate),
@@ -847,51 +803,21 @@ function EmployeeQuickEdit({
               }
             />
           </Field>
-          <Field label="Type de prime">
-            <select
+          <Field label="Prime de base (DZD)">
+            <input
+              required
+              type="number"
+              min={1}
               className={inputClass}
-              value={form.bonusType}
+              value={form.baseBonus}
               onChange={(e) =>
                 setForm((prev) => ({
                   ...prev,
-                  bonusType: e.target.value as "FIXED" | "PERCENTAGE",
+                  baseBonus: Number(e.target.value),
                 }))
               }
-            >
-              <option value="FIXED">Prime de base (DZD)</option>
-              <option value="PERCENTAGE">Pourcentage (%)</option>
-            </select>
+            />
           </Field>
-          {form.bonusType === "FIXED" ? (
-            <Field label="Prime de base (DZD)">
-              <input
-                type="number"
-                className={inputClass}
-                value={form.baseBonus}
-                onChange={(e) =>
-                  setForm((prev) => ({
-                    ...prev,
-                    baseBonus: Number(e.target.value),
-                  }))
-                }
-              />
-            </Field>
-          ) : (
-            <Field label="Pourcentage de prime (%)">
-              <input
-                type="number"
-                step="0.01"
-                className={inputClass}
-                value={form.bonusPercent}
-                onChange={(e) =>
-                  setForm((prev) => ({
-                    ...prev,
-                    bonusPercent: Number(e.target.value),
-                  }))
-                }
-              />
-            </Field>
-          )}
           <Field label="Date d'embauche">
             <input
               type="date"
@@ -964,11 +890,7 @@ function EmployeeQuickEdit({
                     : undefined,
                   phone: form.phone,
                   baseSalary: form.baseSalary,
-                  bonusType: form.bonusType,
-                  baseBonus:
-                    form.bonusType === "FIXED" ? form.baseBonus : 0,
-                  bonusPercent:
-                    form.bonusType === "PERCENTAGE" ? form.bonusPercent : 0,
+                  baseBonus: form.baseBonus,
                   annualLeaveQuota: form.annualLeaveQuota,
                   annualLeaveBalance: form.annualLeaveBalance,
                   hireDate: hireTs,

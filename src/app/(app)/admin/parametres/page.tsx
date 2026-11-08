@@ -28,13 +28,6 @@ type WorkplaceDraft = {
   thursdayWorkEnd: string;
 };
 
-type SettingsDraft = {
-  workingDaysPerMonth: string;
-  primeObjectiveWeightPercent: string;
-  primeRecoveryWeightPercent: string;
-  primeEvaluationWeightPercent: string;
-};
-
 function timeInputValue(hour: number, minute: number) {
   return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
 }
@@ -47,7 +40,6 @@ function timeParts(value: string) {
 export default function AdminParametresPage() {
   const { token } = useAuth();
   const settings = useQuery(api.settings.get, token ? { token } : "skip");
-  const update = useMutation(api.settings.update);
   const workplaces = useQuery(
     api.workplaces.list,
     token ? { token } : "skip"
@@ -55,9 +47,6 @@ export default function AdminParametresPage() {
   const createWorkplace = useMutation(api.workplaces.create);
   const updateWorkplace = useMutation(api.workplaces.update);
   const removeWorkplace = useMutation(api.workplaces.remove);
-  const cleanLegacyOvertime = useMutation(
-    api.overtimeMigration.cleanLegacyOvertimeBatch
-  );
 
   const [newWorkplaceName, setNewWorkplaceName] = useState("");
   const [newWorkplaceDescription, setNewWorkplaceDescription] = useState("");
@@ -68,22 +57,6 @@ export default function AdminParametresPage() {
     Record<string, WorkplaceDraft>
   >({});
   const [workplaceBusy, setWorkplaceBusy] = useState(false);
-  const [migrationBusy, setMigrationBusy] = useState(false);
-  const [settingsDraftOverrides, setSettingsDraftOverrides] =
-    useState<Partial<SettingsDraft>>({});
-  const settingsDraft: SettingsDraft = {
-    workingDaysPerMonth: String(settings?.workingDaysPerMonth ?? 26),
-    primeObjectiveWeightPercent: String(
-      settings?.primeObjectiveWeightPercent ?? 80
-    ),
-    primeRecoveryWeightPercent: String(
-      settings?.primeRecoveryWeightPercent ?? 10
-    ),
-    primeEvaluationWeightPercent: String(
-      settings?.primeEvaluationWeightPercent ?? 10
-    ),
-    ...settingsDraftOverrides,
-  };
   const [msg, setMsg] = useState("");
   const [error, setError] = useState("");
 
@@ -120,34 +93,6 @@ export default function AdminParametresPage() {
     }
   }
   Object.assign(workplaceDrafts, workplaceDraftOverrides);
-
-  function updateSettingsDraft(field: keyof SettingsDraft, value: string) {
-    setSettingsDraftOverrides((draft) => ({ ...draft, [field]: value }));
-  }
-
-  async function onSubmit(e: FormEvent) {
-    e.preventDefault();
-    if (!token) return;
-    setError("");
-    try {
-      await update({
-        token,
-        workingDaysPerMonth: Number(settingsDraft.workingDaysPerMonth),
-        primeObjectiveWeightPercent: Number(
-          settingsDraft.primeObjectiveWeightPercent
-        ),
-        primeRecoveryWeightPercent: Number(
-          settingsDraft.primeRecoveryWeightPercent
-        ),
-        primeEvaluationWeightPercent: Number(
-          settingsDraft.primeEvaluationWeightPercent
-        ),
-      });
-      setMsg("Paramètres enregistrés");
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Erreur");
-    }
-  }
 
   function updateWorkplaceDraft(
     workplaceId: Id<"workplaces">,
@@ -266,152 +211,12 @@ export default function AdminParametresPage() {
     }
   }
 
-  async function onCleanLegacyOvertime() {
-    if (
-      !token ||
-      !window.confirm(
-        "Supprimer définitivement l'historique des heures supplémentaires et les primes associées ?"
-      )
-    ) {
-      return;
-    }
-
-    setMigrationBusy(true);
-    setError("");
-    setMsg("");
-    let overtimeCursor: string | null = null;
-    let attendanceCursor: string | null = null;
-    let notificationCursor: string | null = null;
-    let overtimeDone = false;
-    let attendanceDone = false;
-    let notificationDone = false;
-    let removedRecords = 0;
-    let removedBonuses = 0;
-    let updatedAttendances = 0;
-    let removedNotifications = 0;
-
-    try {
-      while (!overtimeDone || !attendanceDone || !notificationDone) {
-        const result: Awaited<ReturnType<typeof cleanLegacyOvertime>> =
-          await cleanLegacyOvertime({
-            token,
-            overtimeCursor,
-            overtimeDone,
-            attendanceCursor,
-            attendanceDone,
-            notificationCursor,
-            notificationDone,
-          });
-        overtimeCursor = result.overtimeCursor;
-        overtimeDone = result.overtimeDone;
-        attendanceCursor = result.attendanceCursor;
-        attendanceDone = result.attendanceDone;
-        notificationCursor = result.notificationCursor;
-        notificationDone = result.notificationDone;
-        removedRecords += result.removedRecords;
-        removedBonuses += result.removedBonuses;
-        updatedAttendances += result.updatedAttendances;
-        removedNotifications += result.removedNotifications;
-      }
-
-      setMsg(
-        `Nettoyage terminé : ${removedRecords} historique(s), ${removedBonuses} prime(s), ${removedNotifications} notification(s) supprimé(s), ${updatedAttendances} pointage(s) mis à jour.`
-      );
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Erreur");
-    } finally {
-      setMigrationBusy(false);
-    }
-  }
-
-  const weightSum =
-    (Number(settingsDraft.primeObjectiveWeightPercent) || 0) +
-    (Number(settingsDraft.primeRecoveryWeightPercent) || 0) +
-    (Number(settingsDraft.primeEvaluationWeightPercent) || 0);
-
   return (
     <RequireAuth role="admin">
       <PageShell
         title="Paramètres RH"
-        description="Gestion des lieux de travail, horaires et paramètres de calcul des primes."
+        description="Gestion des lieux de travail et de leurs horaires."
       >
-        <form onSubmit={onSubmit} className="space-y-6">
-          <Card className="max-w-lg">
-            <h2 className="mb-1 font-semibold text-zinc-900">
-              Calcul des primes (%)
-            </h2>
-            <p className="mb-4 text-sm text-zinc-500">
-              Parts de la prime de base dérivée (réalisation × % employé). Si
-              l&apos;employé dépasse l&apos;objectif / recouvrement, la part
-              correspondante augmente proportionnellement.
-            </p>
-            <div className="space-y-2">
-              <Field label="Part objectif (%)">
-                <input
-                  type="number"
-                  min={0}
-                  className={inputClass}
-                  value={settingsDraft.primeObjectiveWeightPercent}
-                  onChange={(e) =>
-                    updateSettingsDraft(
-                      "primeObjectiveWeightPercent",
-                      e.target.value
-                    )
-                  }
-                />
-              </Field>
-              <Field label="Part recouvrement (%)">
-                <input
-                  type="number"
-                  min={0}
-                  className={inputClass}
-                  value={settingsDraft.primeRecoveryWeightPercent}
-                  onChange={(e) =>
-                    updateSettingsDraft(
-                      "primeRecoveryWeightPercent",
-                      e.target.value
-                    )
-                  }
-                />
-              </Field>
-              <Field label="Part évaluation manager (%)">
-                <input
-                  type="number"
-                  min={0}
-                  className={inputClass}
-                  value={settingsDraft.primeEvaluationWeightPercent}
-                  onChange={(e) =>
-                    updateSettingsDraft(
-                      "primeEvaluationWeightPercent",
-                      e.target.value
-                    )
-                  }
-                />
-              </Field>
-              <p className="text-xs text-zinc-500">
-                Total actuel : {weightSum}% (défaut recommandé 80 + 10 + 10 =
-                100).
-              </p>
-              <Field label="Jours ouvrés / mois (pour le calcul DZD)">
-                <input
-                  type="number"
-                  min={1}
-                  max={31}
-                  className={inputClass}
-                  value={settingsDraft.workingDaysPerMonth}
-                  onChange={(e) =>
-                    updateSettingsDraft("workingDaysPerMonth", e.target.value)
-                  }
-                />
-              </Field>
-            </div>
-          </Card>
-
-          {error ? <p className="text-sm text-red-600">{error}</p> : null}
-          {msg ? <p className="text-sm text-emerald-600">{msg}</p> : null}
-          <PrimaryButton type="submit">Enregistrer</PrimaryButton>
-        </form>
-
         <section className="mt-8 space-y-4">
           <div>
             <h2 className="text-lg font-semibold text-zinc-900">
@@ -686,25 +491,6 @@ export default function AdminParametresPage() {
           </div>
         </section>
 
-        <Card className="mt-8 max-w-lg">
-          <h2 className="font-semibold text-zinc-900">
-            Nettoyage des anciennes données
-          </h2>
-          <p className="my-2 text-sm text-zinc-500">
-            Supprime l&apos;historique des heures supplémentaires, les primes qui
-            y sont liées, leurs notifications et les anciennes valeurs de
-            pointage.
-          </p>
-          <SecondaryButton
-            type="button"
-            disabled={migrationBusy || !token}
-            onClick={onCleanLegacyOvertime}
-          >
-            {migrationBusy
-              ? "Nettoyage en cours…"
-              : "Supprimer les anciennes données"}
-          </SecondaryButton>
-        </Card>
       </PageShell>
     </RequireAuth>
   );

@@ -35,6 +35,7 @@ export default function AdminOrdresPaiementPage() {
     token ? { token } : "skip"
   );
   const treat = useMutation(api.finances.treatPaymentOrder);
+  const validateBatch = useMutation(api.finances.validatePaymentOrdersBatch);
   const createForEmployee = useMutation(
     api.finances.requestPaymentForEmployee
   );
@@ -53,6 +54,10 @@ export default function AdminOrdresPaiementPage() {
   const [msg, setMsg] = useState("");
   const [formError, setFormError] = useState("");
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [selectedOrderIds, setSelectedOrderIds] = useState<
+    Set<Id<"paymentOrders">>
+  >(() => new Set());
+  const [batchBusy, setBatchBusy] = useState(false);
 
   const employeeHistory = useQuery(
     api.finances.employeeHistory,
@@ -71,6 +76,56 @@ export default function AdminOrdresPaiementPage() {
     }
     return rows;
   }, [orders, filterEmployeeId, statusFilter]);
+  const pendingFiltered = filtered.filter((order) => order.status === "DEMANDE");
+  const selectedPendingOrderIds = (orders ?? [])
+    .filter(
+      (order) =>
+        order.status === "DEMANDE" && selectedOrderIds.has(order._id)
+    )
+    .map((order) => order._id);
+  const allPendingSelected =
+    pendingFiltered.length > 0 &&
+    pendingFiltered.every((order) => selectedOrderIds.has(order._id));
+
+  function toggleOrderSelection(orderId: Id<"paymentOrders">) {
+    setSelectedOrderIds((selected) => {
+      const next = new Set(selected);
+      if (next.has(orderId)) next.delete(orderId);
+      else next.add(orderId);
+      return next;
+    });
+  }
+
+  function toggleAllPendingSelection() {
+    setSelectedOrderIds((selected) => {
+      const next = new Set(selected);
+      if (allPendingSelected) {
+        for (const order of pendingFiltered) next.delete(order._id);
+      } else {
+        for (const order of pendingFiltered) next.add(order._id);
+      }
+      return next;
+    });
+  }
+
+  async function onValidateSelected() {
+    if (!token || selectedPendingOrderIds.length === 0) return;
+    setBatchBusy(true);
+    setError("");
+    setMsg("");
+    try {
+      const result = await validateBatch({
+        token,
+        orderIds: selectedPendingOrderIds,
+      });
+      setMsg(`${result.validated} demande(s) validée(s).`);
+      setSelectedOrderIds(new Set());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Erreur");
+    } finally {
+      setBatchBusy(false);
+    }
+  }
 
   function openCreate() {
     setFormError("");
@@ -92,6 +147,11 @@ export default function AdminOrdresPaiementPage() {
     setMsg("");
     try {
       await treat({ token, orderId, status });
+      setSelectedOrderIds((selected) => {
+        const next = new Set(selected);
+        next.delete(orderId);
+        return next;
+      });
       setMsg(
         status === "VALIDE"
           ? "Demande validée — visible pour la caisse Finance"
@@ -116,6 +176,7 @@ export default function AdminOrdresPaiementPage() {
         employeeName: employeeHistory.employee.name,
         salaries: employeeHistory.salaries,
         bonuses: employeeHistory.bonuses,
+        lateDeductions: employeeHistory.lateDeductions,
         orders: employeeHistory.orders,
       });
     } catch (err) {
@@ -190,6 +251,15 @@ export default function AdminOrdresPaiementPage() {
               </Field>
             </div>
             <div className="flex flex-wrap gap-2">
+              <SecondaryButton
+                type="button"
+                disabled={batchBusy || selectedPendingOrderIds.length === 0}
+                onClick={() => void onValidateSelected()}
+              >
+                {batchBusy
+                  ? "Validation…"
+                  : `Valider la sélection (${selectedPendingOrderIds.length})`}
+              </SecondaryButton>
               <PrimaryButton type="button" onClick={openCreate}>
                 Nouvelle demande
               </PrimaryButton>
@@ -215,6 +285,15 @@ export default function AdminOrdresPaiementPage() {
             <table className="min-w-full text-sm">
               <thead className="text-xs uppercase text-zinc-500">
                 <tr>
+                  <th className="pb-3 pr-3 text-left">
+                    <input
+                      type="checkbox"
+                      aria-label="Sélectionner toutes les demandes en attente affichées"
+                      checked={allPendingSelected}
+                      disabled={pendingFiltered.length === 0 || batchBusy}
+                      onChange={toggleAllPendingSelection}
+                    />
+                  </th>
                   <th className="pb-3 pr-3 text-left">Date</th>
                   <th className="pb-3 pr-3 text-left">Employé</th>
                   <th className="pb-3 pr-3 text-left">Type</th>
@@ -227,6 +306,17 @@ export default function AdminOrdresPaiementPage() {
               <tbody>
                 {filtered.map((order) => (
                   <tr key={order._id} className="border-t border-zinc-100">
+                    <td className="py-3 pr-3">
+                      {order.status === "DEMANDE" ? (
+                        <input
+                          type="checkbox"
+                          aria-label={`Sélectionner la demande de ${order.employee.name}`}
+                          checked={selectedOrderIds.has(order._id)}
+                          disabled={batchBusy}
+                          onChange={() => toggleOrderSelection(order._id)}
+                        />
+                      ) : null}
+                    </td>
                     <td className="py-3 pr-3 whitespace-nowrap text-zinc-600">
                       {formatDate(order.requestedAt)}
                     </td>

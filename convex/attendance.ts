@@ -30,50 +30,6 @@ function getScans(row: Doc<"attendances"> | null): number[] {
   return legacy;
 }
 
-async function syncMonthLateDeductions(
-  ctx: MutationCtx,
-  employeeId: Id<"users">,
-  date: string
-) {
-  const [yearStr, monthStr] = date.split("-");
-  const year = Number(yearStr);
-  const month = Number(monthStr);
-  const { start, end } = monthBounds(year, month);
-
-  const employee = await ctx.db.get(employeeId);
-  if (!employee) return;
-
-  const days = await ctx.db
-    .query("attendances")
-    .withIndex("by_employee", (q) => q.eq("employeeId", employeeId))
-    .collect();
-
-  const monthDays = days.filter((d) => d.date >= start && d.date <= end);
-  const lateDeductions = monthDays.reduce(
-    (sum, d) => sum + (d.delayAmount ?? 0),
-    0
-  );
-  const baseSalary = employee.baseSalary ?? 0;
-
-  const existing = await ctx.db
-    .query("salaries")
-    .withIndex("by_employee_period", (q) =>
-      q.eq("employeeId", employeeId).eq("year", year).eq("month", month)
-    )
-    .unique();
-
-  // Only update an already admin-defined salary — never create one from attendance.
-  if (existing) {
-    const salaryBase = existing.baseSalary || baseSalary;
-    const leaveDeductions = existing.leaveDeductions ?? 0;
-    await ctx.db.patch(existing._id, {
-      lateDeductions,
-      netPay: Math.max(0, salaryBase - lateDeductions - leaveDeductions),
-      updatedAt: Date.now(),
-    });
-  }
-}
-
 async function recalculateDay(
   ctx: MutationCtx,
   employeeId: Id<"users">,
@@ -155,8 +111,6 @@ async function applyDayPatch(
       ...computed,
     });
   }
-
-  await syncMonthLateDeductions(ctx, employeeId, date);
 
   return await ctx.db.get(attendanceId);
 }
@@ -424,6 +378,128 @@ export const adjustLateMinutes = mutation({
       computed
     );
     return await ctx.db.get(args.attendanceId);
+  },
+});
+
+export const monthlyLateDeductionsForAdmin = query({
+  args: {
+    token: v.string(),
+    month: v.number(),
+    year: v.number(),
+  },
+  handler: async (ctx, args) => {
+    await requireAdmin(ctx, args.token);
+    if (args.month < 1 || args.month > 12) {
+      throw new Error("Mois invalide");
+    }
+
+    const { start, end } = monthBounds(args.year, args.month);
+    const attendanceRows = await ctx.db
+      .query("attendances")
+      .withIndex("by_date", (q) => q.gte("date", start).lte("date", end))
+      .collect();
+    const periodRows = await ctx.db
+      .query("approvedLateDeductions")
+      .withIndex("by_period", (q) =>
+        q.eq("year", args.year).eq("month", args.month)
+      )
+      .collect();
+
+    const employeeTotals = new Map<
+      string,
+      { employeeId: Id<"users">; calculatedAmount: number; lateMinutes: number }
+    >();
+    for (const attendance of attendanceRows) {
+      if ((attendance.delayAmount ?? 0) <= 0) continue;
+      const current = employeeTotals.get(attendance.employeeId) ?? {
+        employeeId: attendance.employeeId,
+        calculatedAmount: 0,
+        lateMinutes: 0,
+      };
+      current.calculatedAmount += attendance.delayAmount ?? 0;
+      current.lateMinutes += attendance.lateMinutes;
+      employeeTotals.set(attendance.employeeId, current);
+    }
+
+    const approvedByEmployee = new Map(
+      periodRows.map((row) => [row.employeeId, row])
+    );
+    for (const row of periodRows) {
+      if (!employeeTotals.has(row.employeeId)) {
+        employeeTotals.set(row.employeeId, {
+          employeeId: row.employeeId,
+          calculatedAmount: 0,
+          lateMinutes: 0,
+        });
+      }
+    }
+
+    const result = [];
+    for (const item of employeeTotals.values()) {
+      const employee = await ctx.db.get(item.employeeId);
+      if (!employee) continue;
+      const approval = approvedByEmployee.get(item.employeeId);
+      result.push({
+        employeeId: item.employeeId,
+        employeeName: employee.name,
+        lateMinutes: item.lateMinutes,
+        calculatedAmount: item.calculatedAmount,
+        approvedAmount: approval?.amount ?? null,
+        amount: approval?.amount ?? item.calculatedAmount,
+      });
+    }
+    return result.sort((a, b) => a.employeeName.localeCompare(b.employeeName));
+  },
+});
+
+export const approveMonthlyLateDeduction = mutation({
+  args: {
+    token: v.string(),
+    employeeId: v.id("users"),
+    month: v.number(),
+    year: v.number(),
+    amount: v.number(),
+  },
+  handler: async (ctx, args) => {
+    const admin = await requireAdmin(ctx, args.token);
+    if (args.month < 1 || args.month > 12) {
+      throw new Error("Mois invalide");
+    }
+    if (!Number.isFinite(args.amount) || args.amount < 0) {
+      throw new Error("Montant de retenue invalide");
+    }
+    const employee = await ctx.db.get(args.employeeId);
+    if (!employee || employee.role !== "employee") {
+      throw new Error("Employé introuvable");
+    }
+
+    const existing = await ctx.db
+      .query("approvedLateDeductions")
+      .withIndex("by_employee_period", (q) =>
+        q
+          .eq("employeeId", args.employeeId)
+          .eq("year", args.year)
+          .eq("month", args.month)
+      )
+      .unique();
+    const approval = {
+      amount: args.amount,
+      approvedBy: admin._id,
+      approvedAt: Date.now(),
+    };
+
+    if (existing) {
+      await ctx.db.patch(existing._id, approval);
+      return await ctx.db.get(existing._id);
+    }
+
+    const id = await ctx.db.insert("approvedLateDeductions", {
+      employeeId: args.employeeId,
+      month: args.month,
+      year: args.year,
+      ...approval,
+    });
+    return await ctx.db.get(id);
   },
 });
 

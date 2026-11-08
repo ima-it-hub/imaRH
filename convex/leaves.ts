@@ -97,11 +97,11 @@ async function syncMonthLeaveDeductions(
     .unique();
 
   const baseSalary = existing?.baseSalary || employee.baseSalary || 0;
-  const lateDeductions = existing?.lateDeductions ?? 0;
-  const netPay = Math.max(0, baseSalary - lateDeductions - leaveDeductions);
+  const netPay = Math.max(0, baseSalary - leaveDeductions);
 
   if (existing) {
     await ctx.db.patch(existing._id, {
+      lateDeductions: 0,
       leaveDeductions,
       netPay,
       updatedAt: Date.now(),

@@ -20,16 +20,13 @@ export default defineSchema({
     workplace: v.optional(v.string()),
     workplaceId: v.optional(v.id("workplaces")),
     managerId: v.optional(v.id("users")),
-    /**
-     * FIXED = prime de base (DZD) × évaluation manager
-     * PERCENTAGE = % de la réalisation + objectifs / recouvrement / évaluation
-     */
+    /** Legacy prime mode; new prime calculations use baseBonus for everyone. */
     bonusType: v.optional(
       v.union(v.literal("FIXED"), v.literal("PERCENTAGE"))
     ),
-    /** Prime de base (DZD) when bonusType is FIXED */
+    /** Prime de base (DZD) for the unified prime calculation */
     baseBonus: v.optional(v.number()),
-    /** % applied to réalisation when bonusType is PERCENTAGE (e.g. 2 = 2%) */
+    /** Legacy percentage-based prime value */
     bonusPercent: v.optional(v.number()),
     hireDate: v.optional(v.number()),
     resignedAt: v.optional(v.number()),
@@ -73,11 +70,11 @@ export default defineSchema({
     thursdayWorkEndMinute: v.optional(v.number()),
     /** Used to convert delay minutes into money from monthly salary */
     workingDaysPerMonth: v.optional(v.number()),
-    /** % of derived prime de base for objectif attainment (default 80) */
+    /** Legacy prime weight; retained for stored settings compatibility. */
     primeObjectiveWeightPercent: v.optional(v.number()),
-    /** % of derived prime de base for recouvrement (default 10) */
+    /** Legacy prime weight; the unified formula uses fixed 80/20 weights. */
     primeRecoveryWeightPercent: v.optional(v.number()),
-    /** % of derived prime de base for manager evaluation (default 10) */
+    /** Legacy prime weight; the unified formula uses fixed 80/20 weights. */
     primeEvaluationWeightPercent: v.optional(v.number()),
   }).index("by_key", ["key"]),
 
@@ -232,6 +229,7 @@ export default defineSchema({
     /** Days paid this month / days in calendar month (hire proration) */
     daysWorked: v.optional(v.number()),
     daysInMonth: v.optional(v.number()),
+    /** Legacy field; lateness penalties now reduce the employee's available balance. */
     lateDeductions: v.optional(v.number()),
     /** Unpaid leave / sans_solde deductions for the month */
     leaveDeductions: v.optional(v.number()),
@@ -242,6 +240,18 @@ export default defineSchema({
   })
     .index("by_employee", ["employeeId"])
     .index("by_employee_period", ["employeeId", "year", "month"]),
+
+  approvedLateDeductions: defineTable({
+    employeeId: v.id("users"),
+    month: v.number(),
+    year: v.number(),
+    amount: v.number(),
+    approvedBy: v.id("users"),
+    approvedAt: v.number(),
+  })
+    .index("by_employee", ["employeeId"])
+    .index("by_employee_period", ["employeeId", "year", "month"])
+    .index("by_period", ["year", "month"]),
 
   bonuses: defineTable({
     employeeId: v.id("users"),
@@ -259,6 +269,8 @@ export default defineSchema({
 
   paymentOrders: defineTable({
     employeeId: v.id("users"),
+    /** Salary record that generated this monthly payment order, if applicable */
+    salaryId: v.optional(v.id("salaries")),
     type: v.union(
       v.literal("SALAIRE_MENSUEL"),
       v.literal("ACOMPTE"),
@@ -276,6 +288,7 @@ export default defineSchema({
     treatedAt: v.optional(v.number()),
   })
     .index("by_employee", ["employeeId"])
+    .index("by_salary", ["salaryId"])
     .index("by_status", ["status"]),
 
   monthlyReports: defineTable({
@@ -313,7 +326,7 @@ export default defineSchema({
     .index("by_employee_period", ["employeeId", "year", "month"])
     .index("by_status", ["status"]),
 
-  /** Monthly prime calculation for employees with percentage-based prime */
+  /** Monthly unified base-prime calculation for employees and their managers */
   primeCalculations: defineTable({
     employeeId: v.id("users"),
     month: v.number(),
@@ -321,7 +334,17 @@ export default defineSchema({
     objective: v.number(),
     realisation: v.number(),
     recouvrement: v.number(),
-    /** réalisation × employee bonusPercent / 100 */
+    /** Required recovery amount for individually calculated employees */
+    recoveryObjective: v.optional(v.number()),
+    /** Whether objective / realization were entered specifically for this employee */
+    hasOwnMetrics: v.optional(v.boolean()),
+    /** Employee whose own metrics are inherited when hasOwnMetrics is false */
+    sourceManagerId: v.optional(v.id("users")),
+    /** Workplace whose metrics are inherited when hasOwnMetrics is false */
+    sourceWorkplaceId: v.optional(v.id("workplaces")),
+    /** Version of the prime formula used for this saved calculation */
+    calculationVersion: v.optional(v.number()),
+    /** Fixed base prime in DZD */
     primeBase: v.number(),
     objectiveRatio: v.number(),
     objectiveAmount: v.number(),
@@ -345,6 +368,20 @@ export default defineSchema({
     .index("by_employee_period", ["employeeId", "year", "month"])
     .index("by_period", ["year", "month"])
     .index("by_status", ["status"]),
+
+  workplacePrimeMetrics: defineTable({
+    workplaceId: v.id("workplaces"),
+    month: v.number(),
+    year: v.number(),
+    objective: v.number(),
+    realisation: v.number(),
+    recoveryObjective: v.optional(v.number()),
+    recouvrement: v.optional(v.number()),
+    updatedAt: v.number(),
+    updatedBy: v.id("users"),
+  })
+    .index("by_period", ["year", "month"])
+    .index("by_workplace_period", ["workplaceId", "year", "month"]),
 
   notifications: defineTable({
     userId: v.id("users"),

@@ -14,7 +14,7 @@ import {
   inputClass,
 } from "@/components/ui";
 import { useAuth } from "@/lib/auth";
-import { formatDate, moneyDZD } from "@/lib/format";
+import { formatDate } from "@/lib/format";
 
 export default function EmployeeReportsPage() {
   const { token } = useAuth();
@@ -339,27 +339,8 @@ export default function EmployeeReportsPage() {
                       <Badge className="bg-[#0088E8]/10 text-[#0088E8]">
                         Score {report.percentage}%
                       </Badge>
-                      <Badge className="bg-emerald-50 text-emerald-700">
-                        Prime {moneyDZD(report.computedBonus)}
-                      </Badge>
                     </div>
                   </div>
-
-                  {(report.scores ?? []).length > 0 ? (
-                    <div className="mb-4 grid gap-2 sm:grid-cols-2">
-                      {report.scores.map((s) => (
-                        <div
-                          key={s.conditionId}
-                          className="rounded-xl border border-zinc-100 bg-zinc-50 px-3 py-2 text-sm"
-                        >
-                          <p className="text-zinc-600">{s.label}</p>
-                          <p className="font-semibold text-zinc-900">
-                            {s.points}/5 · {Math.round((s.points / 5) * 100)}%
-                          </p>
-                        </div>
-                      ))}
-                    </div>
-                  ) : null}
 
                   <p className="whitespace-pre-wrap text-sm leading-6 text-zinc-700">
                     {report.employeeReport}
