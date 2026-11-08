@@ -90,7 +90,6 @@ async function upsertInheritedDraft(
     ...computed,
     calculationVersion: 2,
     status: "BROUILLON" as const,
-    bonusId: undefined,
     updatedAt: now,
   };
 
@@ -535,6 +534,7 @@ export const saveDrafts = mutation({
         metric,
       ])
     );
+    const changedWorkplaceIds = new Set<Id<"workplaces">>();
     for (const entry of args.workplaceEntries) {
       if (!workplaceIds.has(entry.workplaceId)) {
         throw new Error("Lieu de travail introuvable");
@@ -549,6 +549,7 @@ export const saveDrafts = mutation({
         if (existing) {
           await ctx.db.delete(existing._id);
           metricsByWorkplace.delete(entry.workplaceId);
+          changedWorkplaceIds.add(entry.workplaceId);
         }
         continue;
       }
@@ -590,6 +591,15 @@ export const saveDrafts = mutation({
         updatedAt: now,
         updatedBy: admin._id,
       };
+      if (
+        !existing ||
+        existing.objective !== payload.objective ||
+        existing.realisation !== payload.realisation ||
+        existing.recoveryObjective !== payload.recoveryObjective ||
+        existing.recouvrement !== payload.recouvrement
+      ) {
+        changedWorkplaceIds.add(entry.workplaceId);
+      }
       if (existing) {
         await ctx.db.patch(existing._id, payload);
         metricsByWorkplace.set(entry.workplaceId, {
@@ -603,6 +613,7 @@ export const saveDrafts = mutation({
       }
     }
 
+    const changedMetricOwnerIds = new Set<Id<"users">>();
     for (const entry of args.entries) {
       const employee = employeeById.get(entry.employeeId);
       if (!employee) throw new Error("Employé introuvable ou inactif");
@@ -632,8 +643,15 @@ export const saveDrafts = mutation({
       }
 
       const existing = calculationByEmployee.get(entry.employeeId);
-      if (existing?.status === "CONFIRME") {
-        throw new Error(`La prime de ${employee.name} est déjà confirmée`);
+      if (
+        !existing ||
+        existing.objective !== entry.objective ||
+        existing.realisation !== entry.realisation ||
+        existing.recoveryObjective !== entry.recoveryObjective ||
+        existing.recouvrement !== entry.recouvrement ||
+        existing.hasOwnMetrics !== true
+      ) {
+        changedMetricOwnerIds.add(entry.employeeId);
       }
 
       const evaluationPercent = await evaluationPercentForMonth(
@@ -651,6 +669,14 @@ export const saveDrafts = mutation({
         evaluationPercent,
         applyRecoveryAdjustment: employee.role === "employee",
       });
+      const inputsUnchanged =
+        existing?.status === "CONFIRME" &&
+        existing.hasOwnMetrics === true &&
+        existing.objective === entry.objective &&
+        existing.realisation === entry.realisation &&
+        existing.recoveryObjective === entry.recoveryObjective &&
+        existing.recouvrement === entry.recouvrement &&
+        existing.evaluationPercent === computed.evaluationPercent;
       const payload = {
         employeeId: employee._id,
         month: args.month,
@@ -664,8 +690,7 @@ export const saveDrafts = mutation({
         sourceWorkplaceId: undefined,
         ...computed,
         calculationVersion: 2,
-        status: "BROUILLON" as const,
-        bonusId: undefined,
+        status: inputsUnchanged ? ("CONFIRME" as const) : ("BROUILLON" as const),
         updatedAt: now,
       };
 
@@ -688,19 +713,19 @@ export const saveDrafts = mutation({
     for (const employee of metricOwners) {
       if (selectedIds.has(employee._id)) continue;
       const existing = calculationByEmployee.get(employee._id);
-      if (
-        existing?.status === "BROUILLON" &&
-        existing.hasOwnMetrics === true
-      ) {
+      if (existing?.hasOwnMetrics === true) {
+        changedMetricOwnerIds.add(employee._id);
         const demoted = {
           ...existing,
           hasOwnMetrics: false,
+          status: "BROUILLON" as const,
           sourceManagerId: undefined,
           sourceWorkplaceId: undefined,
           updatedAt: now,
         };
         await ctx.db.patch(existing._id, {
           hasOwnMetrics: false,
+          status: "BROUILLON",
           sourceManagerId: undefined,
           sourceWorkplaceId: undefined,
           updatedAt: now,
@@ -713,7 +738,14 @@ export const saveDrafts = mutation({
       if (selectedIds.has(employee._id)) continue;
 
       const existing = calculationByEmployee.get(employee._id);
-      if (existing?.status === "CONFIRME") continue;
+      const confirmedSourceChanged =
+        existing?.status === "CONFIRME" &&
+        existing.hasOwnMetrics === false &&
+        ((existing.sourceWorkplaceId !== undefined &&
+          changedWorkplaceIds.has(existing.sourceWorkplaceId)) ||
+          (existing.sourceManagerId !== undefined &&
+            changedMetricOwnerIds.has(existing.sourceManagerId)));
+      if (existing?.status === "CONFIRME" && !confirmedSourceChanged) continue;
       if ((employee.baseBonus ?? 0) <= 0) {
         if (existing) {
           await ctx.db.delete(existing._id);
@@ -914,6 +946,9 @@ export const confirmBatch = mutation({
             year: row.year,
           });
         }
+      } else if (bonusId && (await ctx.db.get(bonusId))) {
+        await ctx.db.delete(bonusId);
+        bonusId = undefined;
       }
 
       await ctx.db.patch(calculationId, {

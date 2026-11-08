@@ -498,29 +498,27 @@ async function syncSalaryPaymentOrder(
   const note = `Salaire mensuel ${args.month}/${args.year}`;
 
   if (args.amount <= 0) {
-    if (existing?.status === "DEMANDE" || existing?.status === "REJETE") {
+    if (existing) {
+      if (existing.status === "PAYE") {
+        if (options?.preservePaidOrder) return "unchanged" as const;
+        throw new Error(
+          `Le salaire de ${args.month}/${args.year} a déjà été payé et ne peut pas être modifié.`
+        );
+      }
       await ctx.db.delete(existing._id);
       return "removed" as const;
-    }
-    if (existing && existing.amount !== args.amount) {
-      throw new Error(
-        `Le salaire de ${args.month}/${args.year} a déjà été validé ou payé. Corrigez l'ordre avant de modifier ce salaire.`
-      );
     }
     return "unchanged" as const;
   }
 
   if (existing) {
-    if (
-      (existing.status === "VALIDE" || existing.status === "PAYE") &&
-      existing.amount !== args.amount
-    ) {
+    if (existing.status === "PAYE" && existing.amount !== args.amount) {
       if (options?.preservePaidOrder) return "unchanged" as const;
       throw new Error(
-        `Le salaire de ${args.month}/${args.year} a déjà été validé ou payé. Corrigez l'ordre avant de modifier ce salaire.`
+        `Le salaire de ${args.month}/${args.year} a déjà été payé et ne peut pas être modifié.`
       );
     }
-    if (existing.status === "DEMANDE" && existing.amount === args.amount) {
+    if (existing.amount === args.amount) {
       return "unchanged" as const;
     }
     await ctx.db.patch(existing._id, {

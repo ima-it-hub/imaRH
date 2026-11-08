@@ -1,6 +1,7 @@
 import { mutation, query, MutationCtx } from "./_generated/server";
 import { v } from "convex/values";
 import { Id } from "./_generated/dataModel";
+import { recalculateLeaveAttendance } from "./attendance";
 import {
   addDaysISO,
   daysBetween,
@@ -59,6 +60,34 @@ export function splitLeaveCharges(args: {
   }
   // maladie with isPaid unset — treat as paid (safe default)
   return { fromBalance: 0, fromSalary: 0 };
+}
+
+function isValidISODate(value: string) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return (
+    date.getUTCFullYear() === year &&
+    date.getUTCMonth() === month - 1 &&
+    date.getUTCDate() === day
+  );
+}
+
+function isValidClockTime(value: string) {
+  const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(value);
+  return Boolean(match);
+}
+
+function dateRangesOverlap(
+  firstStart: string,
+  firstEnd: string,
+  secondStart: string,
+  secondEnd: string
+) {
+  return firstStart < secondEnd && secondStart < firstEnd;
 }
 
 async function syncMonthLeaveDeductions(
@@ -128,7 +157,9 @@ export const myLeaves = query({
       .query("leaves")
       .withIndex("by_employee", (q) => q.eq("employeeId", user._id))
       .collect();
-    return rows.sort((a, b) => b.createdAt - a.createdAt);
+    return rows
+      .filter((leave) => !leave.companyLeaveHalfDay)
+      .sort((a, b) => b.createdAt - a.createdAt);
   },
 });
 
@@ -258,6 +289,14 @@ export const all = query({
   },
 });
 
+export const companyHalfDaySchedules = query({
+  args: { token: v.string() },
+  handler: async (ctx, args) => {
+    await requireAdmin(ctx, args.token);
+    return await ctx.db.query("companyHalfDaySchedules").collect();
+  },
+});
+
 /** Admin creates a leave request on behalf of an employee. */
 export const requestForEmployee = mutation({
   args: {
@@ -345,6 +384,357 @@ export const requestForEmployee = mutation({
     );
 
     return await ctx.db.get(id);
+  },
+});
+
+/** Creates and immediately charges a company-wide annual leave for active employees. */
+export const createCompanyLeave = mutation({
+  args: {
+    token: v.string(),
+    name: v.string(),
+    startDate: v.string(),
+    endDate: v.string(),
+    halfDay: v.optional(v.boolean()),
+    leavingTime: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    await requireAdmin(ctx, args.token);
+    const name = args.name.trim();
+    if (!name) throw new Error("Le nom du congé est obligatoire");
+    if (!isValidISODate(args.startDate) || !isValidISODate(args.endDate)) {
+      throw new Error("Saisissez des dates valides");
+    }
+
+    const days = daysBetween(args.startDate, args.endDate);
+    if (days < 1) {
+      throw new Error(
+        "La date de retour doit être après la date de départ"
+      );
+    }
+    if (args.halfDay && days !== 1) {
+      throw new Error(
+        "Un congé d'une demi-journée doit couvrir une seule journée"
+      );
+    }
+    if (args.halfDay && !isValidClockTime(args.leavingTime ?? "")) {
+      throw new Error("Saisissez une heure de départ valide pour le demi-jour");
+    }
+    const leaveDays = args.halfDay ? 0.5 : days;
+    const chargedDays = args.halfDay ? 0 : days;
+
+    const employees = (await ctx.db.query("users").collect()).filter(
+      (user) =>
+        user.role === "employee" && user.isActive && !user.resignedAt
+    );
+    if (!employees.length) {
+      throw new Error("Aucun employé actif à qui appliquer ce congé");
+    }
+
+    if (args.halfDay) {
+      const existingSchedules = await ctx.db
+        .query("companyHalfDaySchedules")
+        .withIndex("by_date", (q) => q.eq("date", args.startDate))
+        .collect();
+      if (
+        existingSchedules.length ||
+        (await ctx.db.query("leaves").collect()).some(
+          (leave) =>
+            leave.companyLeaveName &&
+            dateRangesOverlap(
+              leave.startDate,
+              leave.endDate,
+              args.startDate,
+              args.endDate
+            )
+        )
+      ) {
+        throw new Error(
+          "Un congé collectif existe déjà pour cette période"
+        );
+      }
+      const now = Date.now();
+      await ctx.db.insert("companyHalfDaySchedules", {
+        name,
+        date: args.startDate,
+        leavingTime: args.leavingTime!,
+        createdAt: now,
+        updatedAt: now,
+      });
+      for (const employee of employees) {
+        await recalculateLeaveAttendance(ctx, employee._id, [
+          { startDate: args.startDate, endDate: args.endDate },
+        ]);
+      }
+      return { employeeCount: employees.length, days: 0 };
+    }
+
+    const [existingLeaves, existingSchedules] = await Promise.all([
+      ctx.db.query("leaves").collect(),
+      ctx.db.query("companyHalfDaySchedules").collect(),
+    ]);
+    if (
+      existingLeaves.some(
+        (leave) =>
+          leave.companyLeaveName &&
+          dateRangesOverlap(
+            leave.startDate,
+            leave.endDate,
+            args.startDate,
+            args.endDate
+          )
+      ) ||
+      existingSchedules.some(
+        (schedule) =>
+          schedule.date >= args.startDate && schedule.date < args.endDate
+      )
+    ) {
+      throw new Error(
+        "Un congé collectif existe déjà pour cette période"
+      );
+    }
+
+    const now = Date.now();
+    for (const employee of employees) {
+      await ctx.db.patch(employee._id, {
+        annualLeaveBalance: (employee.annualLeaveBalance ?? 0) - chargedDays,
+      });
+      await ctx.db.insert("leaves", {
+        employeeId: employee._id,
+        companyLeaveName: name,
+        companyLeaveHalfDay: args.halfDay ?? false,
+        companyLeaveLeavingTime: args.halfDay
+          ? args.leavingTime
+          : undefined,
+        type: "annuel",
+        startDate: args.startDate,
+        endDate: args.endDate,
+        actualStartDate: args.startDate,
+        actualEndDate: args.endDate,
+        days: leaveDays,
+        deductedDays: chargedDays,
+        balanceDeducted: chargedDays > 0,
+        reason: `Congé collectif — ${name}`,
+        status: "CLOTURE",
+        isPaid: true,
+        createdAt: now,
+        treatedAt: now,
+        closedAt: now,
+      });
+      await recalculateLeaveAttendance(ctx, employee._id, [
+        { startDate: args.startDate, endDate: args.endDate },
+      ]);
+      await notify(
+        ctx,
+        employee._id,
+        "Congé collectif enregistré",
+        `Le congé collectif « ${name} » du ${args.startDate} au ${args.endDate}${args.halfDay ? ` (demi-journée, départ à ${args.leavingTime})` : ` (${chargedDays} jour(s) décompté(s))`} a été enregistré${chargedDays > 0 ? " et déduit de votre solde annuel" : " sans déduction du solde annuel"}.`
+      );
+    }
+
+    return { employeeCount: employees.length, days: leaveDays };
+  },
+});
+
+export const updateCompanyLeave = mutation({
+  args: {
+    token: v.string(),
+    currentName: v.string(),
+    currentStartDate: v.string(),
+    currentEndDate: v.string(),
+    name: v.string(),
+    startDate: v.string(),
+    endDate: v.string(),
+    halfDay: v.optional(v.boolean()),
+    leavingTime: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    await requireAdmin(ctx, args.token);
+    const name = args.name.trim();
+    if (!name) throw new Error("Le nom du congé est obligatoire");
+    if (!isValidISODate(args.startDate) || !isValidISODate(args.endDate)) {
+      throw new Error("Saisissez des dates valides");
+    }
+    const days = daysBetween(args.startDate, args.endDate);
+    if (days < 1) {
+      throw new Error("La date de retour doit être après la date de départ");
+    }
+    if (args.halfDay && days !== 1) {
+      throw new Error(
+        "Un congé d'une demi-journée doit couvrir une seule journée"
+      );
+    }
+    if (args.halfDay && !isValidClockTime(args.leavingTime ?? "")) {
+      throw new Error("Saisissez une heure de départ valide pour le demi-jour");
+    }
+    const leaveDays = args.halfDay ? 0.5 : days;
+    const chargedDays = args.halfDay ? 0 : days;
+    const allLeaves = await ctx.db.query("leaves").collect();
+    const group = allLeaves.filter(
+      (leave) =>
+        leave.companyLeaveName === args.currentName &&
+        leave.startDate === args.currentStartDate &&
+        leave.endDate === args.currentEndDate
+    );
+    const schedules = await ctx.db.query("companyHalfDaySchedules").collect();
+    const existingSchedule = schedules.find(
+      (schedule) =>
+        schedule.name === args.currentName &&
+        schedule.date === args.currentStartDate &&
+        args.currentEndDate === addDaysISO(schedule.date, 1)
+    );
+    if (!group.length && !existingSchedule) {
+      throw new Error("Congé collectif introuvable");
+    }
+    if (
+      allLeaves.some(
+        (leave) =>
+          leave.companyLeaveName &&
+          dateRangesOverlap(
+            leave.startDate,
+            leave.endDate,
+            args.startDate,
+            args.endDate
+          ) &&
+          !group.some((member) => member._id === leave._id)
+      ) ||
+      schedules.some(
+        (schedule) =>
+          schedule.date >= args.startDate &&
+          schedule.date < args.endDate &&
+          !(
+            existingSchedule &&
+            schedule._id === existingSchedule._id
+          )
+      )
+    ) {
+      throw new Error(
+        "Un autre congé collectif existe déjà pour cette période"
+      );
+    }
+
+    const oldRange = {
+      startDate: args.currentStartDate,
+      endDate: args.currentEndDate,
+    };
+    const newRange = { startDate: args.startDate, endDate: args.endDate };
+    if (existingSchedule) {
+      if (args.halfDay) {
+        await ctx.db.patch(existingSchedule._id, {
+          name,
+          date: args.startDate,
+          leavingTime: args.leavingTime!,
+          updatedAt: Date.now(),
+        });
+      } else {
+        await ctx.db.delete(existingSchedule._id);
+        const employees = (await ctx.db.query("users").collect()).filter(
+          (user) =>
+            user.role === "employee" && user.isActive && !user.resignedAt
+        );
+        const now = Date.now();
+        for (const employee of employees) {
+          await ctx.db.patch(employee._id, {
+            annualLeaveBalance: (employee.annualLeaveBalance ?? 0) - days,
+          });
+          await ctx.db.insert("leaves", {
+            employeeId: employee._id,
+            companyLeaveName: name,
+            companyLeaveHalfDay: false,
+            type: "annuel",
+            startDate: args.startDate,
+            endDate: args.endDate,
+            actualStartDate: args.startDate,
+            actualEndDate: args.endDate,
+            days,
+            deductedDays: days,
+            balanceDeducted: true,
+            reason: `Congé collectif — ${name}`,
+            status: "CLOTURE",
+            isPaid: true,
+            createdAt: now,
+            treatedAt: now,
+            closedAt: now,
+          });
+          await notify(
+            ctx,
+            employee._id,
+            "Congé collectif modifié",
+            `Le congé collectif « ${name} » du ${args.startDate} au ${args.endDate} a été modifié. ${days} jour(s) ont été déduits de votre solde annuel.`
+          );
+        }
+      }
+      const employees = (await ctx.db.query("users").collect()).filter(
+        (user) =>
+          user.role === "employee" && user.isActive && !user.resignedAt
+      );
+      for (const employee of employees) {
+        await recalculateLeaveAttendance(ctx, employee._id, [oldRange, newRange]);
+      }
+      return {
+        employeeCount: employees.length,
+        days: args.halfDay ? 0 : days,
+      };
+    }
+
+    if (args.halfDay) {
+      const now = Date.now();
+      await ctx.db.insert("companyHalfDaySchedules", {
+        name,
+        date: args.startDate,
+        leavingTime: args.leavingTime!,
+        createdAt: now,
+        updatedAt: now,
+      });
+      for (const leave of group) {
+        const employee = await ctx.db.get(leave.employeeId);
+        if (!employee) continue;
+        const previousDeduction = leave.deductedDays ?? leave.days;
+        await ctx.db.patch(employee._id, {
+          annualLeaveBalance:
+            (employee.annualLeaveBalance ?? 0) + previousDeduction,
+        });
+        await ctx.db.delete(leave._id);
+        await recalculateLeaveAttendance(ctx, employee._id, [
+          oldRange,
+          newRange,
+        ]);
+      }
+      return { employeeCount: group.length, days: 0 };
+    }
+
+    for (const leave of group) {
+      const employee = await ctx.db.get(leave.employeeId);
+      if (!employee) continue;
+      const previousDeduction = leave.deductedDays ?? leave.days;
+      await ctx.db.patch(employee._id, {
+        annualLeaveBalance:
+          (employee.annualLeaveBalance ?? 0) + previousDeduction - chargedDays,
+      });
+      await ctx.db.patch(leave._id, {
+        companyLeaveName: name,
+        companyLeaveHalfDay: args.halfDay ?? false,
+        companyLeaveLeavingTime: args.halfDay
+          ? args.leavingTime
+          : undefined,
+        startDate: args.startDate,
+        endDate: args.endDate,
+        actualStartDate: args.startDate,
+        actualEndDate: args.endDate,
+        days: leaveDays,
+        deductedDays: chargedDays,
+        balanceDeducted: chargedDays > 0,
+        reason: `Congé collectif — ${name}`,
+      });
+      await recalculateLeaveAttendance(ctx, employee._id, [oldRange, newRange]);
+      await notify(
+        ctx,
+        employee._id,
+        "Congé collectif modifié",
+        `Le congé collectif « ${name} » du ${args.startDate} au ${args.endDate}${args.halfDay ? ` (demi-journée, départ à ${args.leavingTime})` : ` (${chargedDays} jour(s) décompté(s))`}. Votre solde annuel a été mis à jour${chargedDays === 0 ? " sans déduction pour cette demi-journée" : ""}.`
+      );
+    }
+
+    return { employeeCount: group.length, days: leaveDays };
   },
 });
 

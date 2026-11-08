@@ -47,9 +47,15 @@ export default function AdminCongesPage() {
   const pending = useQuery(api.leaves.pending, token ? { token } : "skip");
   const toClose = useQuery(api.leaves.toClose, token ? { token } : "skip");
   const all = useQuery(api.leaves.all, token ? { token } : "skip");
+  const halfDaySchedules = useQuery(
+    api.leaves.companyHalfDaySchedules,
+    token ? { token } : "skip"
+  );
   const decide = useMutation(api.leaves.decide);
   const recordActualDates = useMutation(api.leaves.recordActualDates);
   const requestForEmployee = useMutation(api.leaves.requestForEmployee);
+  const createCompanyLeave = useMutation(api.leaves.createCompanyLeave);
+  const updateCompanyLeave = useMutation(api.leaves.updateCompanyLeave);
 
   const [responses, setResponses] = useState<Record<string, string>>({});
   const [maladiePaid, setMaladiePaid] = useState<
@@ -78,9 +84,100 @@ export default function AdminCongesPage() {
   const [error, setError] = useState("");
   const [msg, setMsg] = useState("");
   const [formError, setFormError] = useState("");
+  const [showCompanyLeave, setShowCompanyLeave] = useState(false);
+  const [companyLeaveName, setCompanyLeaveName] = useState("");
+  const [companyLeaveStart, setCompanyLeaveStart] = useState("");
+  const [companyLeaveEnd, setCompanyLeaveEnd] = useState("");
+  const [companyLeaveHalfDay, setCompanyLeaveHalfDay] = useState(false);
+  const [companyLeaveLeavingTime, setCompanyLeaveLeavingTime] = useState("");
+  const [companyLeaveYear, setCompanyLeaveYear] = useState(
+    new Date().getFullYear()
+  );
+  const [editingCompanyLeave, setEditingCompanyLeave] = useState<{
+    name: string;
+    startDate: string;
+    endDate: string;
+  } | null>(null);
+  const [companyLeaveError, setCompanyLeaveError] = useState("");
+  const [creatingCompanyLeave, setCreatingCompanyLeave] = useState(false);
+
+  const companyLeaveGroups = useMemo(() => {
+    const groups = new Map<
+      string,
+      {
+        name: string;
+        startDate: string;
+        endDate: string;
+        days: number;
+        halfDay: boolean;
+        leavingTime?: string;
+        employeeCount: number;
+      }
+    >();
+    for (const leave of all ?? []) {
+      if (!leave.companyLeaveName) continue;
+      const key = JSON.stringify([
+        leave.companyLeaveName,
+        leave.startDate,
+        leave.endDate,
+      ]);
+      const group = groups.get(key);
+      if (group) {
+        group.employeeCount += 1;
+      } else {
+        groups.set(key, {
+          name: leave.companyLeaveName,
+          startDate: leave.startDate,
+          endDate: leave.endDate,
+          days: leave.days,
+          halfDay: leave.companyLeaveHalfDay ?? false,
+          leavingTime: leave.companyLeaveLeavingTime,
+          employeeCount: 1,
+        });
+      }
+    }
+    for (const schedule of halfDaySchedules ?? []) {
+      const endDate = new Date(`${schedule.date}T00:00:00`);
+      endDate.setDate(endDate.getDate() + 1);
+      const endDateISO = `${endDate.getFullYear()}-${String(
+        endDate.getMonth() + 1
+      ).padStart(2, "0")}-${String(endDate.getDate()).padStart(2, "0")}`;
+      const key = JSON.stringify([schedule.name, schedule.date, endDateISO]);
+      if (!groups.has(key)) {
+        groups.set(key, {
+          name: schedule.name,
+          startDate: schedule.date,
+          endDate: endDateISO,
+          days: 0.5,
+          halfDay: true,
+          leavingTime: schedule.leavingTime,
+          employeeCount: (employees ?? []).filter((employee) => employee.isActive)
+            .length,
+        });
+      }
+    }
+    return [...groups.values()]
+      .filter((group) => Number(group.startDate.slice(0, 4)) === companyLeaveYear)
+      .sort((a, b) => a.startDate.localeCompare(b.startDate));
+  }, [all, companyLeaveYear, employees, halfDaySchedules]);
+  const companyLeaveYears = [
+    ...new Set([
+      new Date().getFullYear(),
+      ...(all ?? [])
+        .filter((leave) => leave.companyLeaveName)
+        .map((leave) => Number(leave.startDate.slice(0, 4))),
+      ...(halfDaySchedules ?? []).map((schedule) =>
+        Number(schedule.date.slice(0, 4))
+      ),
+    ]),
+  ].sort((a, b) => b - a);
 
   const history = useMemo(
-    () => (all ?? []).filter((l) => l.status !== "EN_ATTENTE"),
+    () =>
+      (all ?? []).filter(
+        (leave) =>
+          leave.status !== "EN_ATTENTE" && !leave.companyLeaveHalfDay
+      ),
     [all]
   );
 
@@ -140,6 +237,52 @@ export default function AdminCongesPage() {
       setShowCreate(false);
     } catch (err) {
       setFormError(err instanceof Error ? err.message : "Erreur");
+    }
+  }
+
+  async function onCreateCompanyLeave(e: FormEvent) {
+    e.preventDefault();
+    if (!token) return;
+    setCompanyLeaveError("");
+    setCreatingCompanyLeave(true);
+    try {
+      const result = editingCompanyLeave
+        ? await updateCompanyLeave({
+            token,
+            currentName: editingCompanyLeave.name,
+            currentStartDate: editingCompanyLeave.startDate,
+            currentEndDate: editingCompanyLeave.endDate,
+            name: companyLeaveName,
+            startDate: companyLeaveStart,
+            endDate: companyLeaveEnd,
+            halfDay: companyLeaveHalfDay,
+            leavingTime: companyLeaveLeavingTime,
+          })
+        : await createCompanyLeave({
+            token,
+            name: companyLeaveName,
+            startDate: companyLeaveStart,
+            endDate: companyLeaveEnd,
+            halfDay: companyLeaveHalfDay,
+            leavingTime: companyLeaveLeavingTime,
+          });
+      setMsg(
+        `Congé collectif ${editingCompanyLeave ? "modifié" : "enregistré"} pour ${result.employeeCount} employé(s) : ${
+          companyLeaveHalfDay
+            ? `demi-journée avec départ à ${companyLeaveLeavingTime}, sans déduction du solde annuel`
+            : `${result.days} jour(s) déduit(s) par employé`
+        }.`
+      );
+      setCompanyLeaveName("");
+      setCompanyLeaveStart("");
+      setCompanyLeaveEnd("");
+      setCompanyLeaveHalfDay(false);
+      setCompanyLeaveLeavingTime("");
+      setEditingCompanyLeave(null);
+    } catch (err) {
+      setCompanyLeaveError(err instanceof Error ? err.message : "Erreur");
+    } finally {
+      setCreatingCompanyLeave(false);
     }
   }
 
@@ -229,7 +372,16 @@ export default function AdminCongesPage() {
           </p>
         ) : null}
 
-        <div className="mb-6 flex justify-end">
+        <div className="mb-6 flex flex-wrap justify-end gap-2">
+          <SecondaryButton
+            type="button"
+            onClick={() => {
+              setCompanyLeaveError("");
+              setShowCompanyLeave(true);
+            }}
+          >
+            Congé collectif
+          </SecondaryButton>
           <PrimaryButton type="button" onClick={openCreate}>
             Nouveau congé
           </PrimaryButton>
@@ -503,7 +655,17 @@ export default function AdminCongesPage() {
                       </p>
                     </td>
                     <td className="py-3 pr-3 text-zinc-700">
-                      {leave.type}
+                      {leave.companyLeaveName
+                        ? `Collectif · ${leave.companyLeaveName}${
+                            leave.companyLeaveHalfDay
+                              ? ` · ½ journée${
+                                  leave.companyLeaveLeavingTime
+                                    ? ` · départ ${leave.companyLeaveLeavingTime}`
+                                    : ""
+                                }`
+                              : ""
+                          }`
+                        : leave.type}
                       {leave.type === "maladie"
                         ? leave.isPaid === true
                           ? " · payé"
@@ -515,7 +677,9 @@ export default function AdminCongesPage() {
                     <td className="py-3 pr-3 whitespace-nowrap text-zinc-600">
                       {leave.startDate} → {leave.endDate}
                       <span className="block text-xs text-zinc-400">
-                        {leave.days} j demandés
+                        {leave.companyLeaveHalfDay
+                          ? "Demi-journée"
+                          : `${leave.days} j demandés`}
                       </span>
                     </td>
                     <td className="py-3 pr-3 whitespace-nowrap text-zinc-600">
@@ -539,7 +703,9 @@ export default function AdminCongesPage() {
                     <td className="py-3 pr-3 text-right font-medium text-zinc-900">
                       {leave.status === "CLOTURE" ? (
                         <>
-                          {(leave.deductedDays ?? 0) > 0
+                          {leave.companyLeaveHalfDay
+                            ? "½ journée non décomptée"
+                            : (leave.deductedDays ?? 0) > 0
                             ? `${leave.deductedDays} j solde`
                             : null}
                           {(leave.salaryDeductedDays ?? 0) > 0 ? (
@@ -547,7 +713,8 @@ export default function AdminCongesPage() {
                               {leave.salaryDeductedDays} j salaire
                             </span>
                           ) : null}
-                          {(leave.deductedDays ?? 0) === 0 &&
+                          {!leave.companyLeaveHalfDay &&
+                          (leave.deductedDays ?? 0) === 0 &&
                           (leave.salaryDeductedDays ?? 0) === 0
                             ? "0 décompté"
                             : null}
@@ -681,6 +848,182 @@ export default function AdminCongesPage() {
                 Annuler
               </SecondaryButton>
               <PrimaryButton type="submit">Créer le congé</PrimaryButton>
+            </div>
+          </form>
+        </Modal>
+
+        <Modal
+          open={showCompanyLeave}
+          onClose={() => {
+            if (!creatingCompanyLeave) setShowCompanyLeave(false);
+          }}
+          title="Congés collectifs"
+        >
+          <form onSubmit={onCreateCompanyLeave} className="grid gap-3">
+            {companyLeaveError ? (
+              <p className="text-sm text-red-600">{companyLeaveError}</p>
+            ) : null}
+            <div className="space-y-3">
+              <div className="flex items-center justify-between gap-3">
+                <h3 className="font-semibold text-zinc-900">
+                  Congés de l&apos;année
+                </h3>
+                <select
+                  aria-label="Année des congés collectifs"
+                  className={`${inputClass} max-w-32`}
+                  value={companyLeaveYear}
+                  onChange={(e) => setCompanyLeaveYear(Number(e.target.value))}
+                >
+                  {companyLeaveYears.map((year) => (
+                    <option key={year} value={year}>
+                      {year}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              {companyLeaveGroups.map((leave) => (
+                <div
+                  key={`${leave.name}-${leave.startDate}-${leave.endDate}`}
+                  className="flex flex-col gap-2 rounded-xl border border-zinc-200 p-3 sm:flex-row sm:items-center sm:justify-between"
+                >
+                  <div>
+                    <p className="font-medium text-zinc-900">{leave.name}</p>
+                    <p className="text-sm text-zinc-500">
+                      {leave.startDate} → {leave.endDate} ·{" "}
+                      {leave.halfDay ? "½ journée" : `${leave.days} jour(s)`} ·{" "}
+                      {leave.halfDay && leave.leavingTime
+                        ? `départ ${leave.leavingTime} · `
+                        : ""}
+                      {leave.employeeCount} employé(s)
+                    </p>
+                  </div>
+                  <SecondaryButton
+                    type="button"
+                    onClick={() => {
+                      setEditingCompanyLeave({
+                        name: leave.name,
+                        startDate: leave.startDate,
+                        endDate: leave.endDate,
+                      });
+                      setCompanyLeaveName(leave.name);
+                      setCompanyLeaveStart(leave.startDate);
+                      setCompanyLeaveEnd(leave.endDate);
+                      setCompanyLeaveHalfDay(leave.halfDay);
+                      setCompanyLeaveLeavingTime(leave.leavingTime ?? "");
+                      setCompanyLeaveError("");
+                    }}
+                  >
+                    Modifier
+                  </SecondaryButton>
+                </div>
+              ))}
+              {!companyLeaveGroups.length ? (
+                <p className="rounded-xl bg-zinc-50 px-3 py-4 text-sm text-zinc-500">
+                  Aucun congé collectif enregistré pour {companyLeaveYear}.
+                </p>
+              ) : null}
+            </div>
+            <h3 className="border-t border-zinc-100 pt-3 font-semibold text-zinc-900">
+              {editingCompanyLeave
+                ? "Modifier le congé collectif"
+                : "Créer un congé collectif"}
+            </h3>
+            <Field label="Nom du congé">
+              <input
+                required
+                className={inputClass}
+                value={companyLeaveName}
+                onChange={(e) => setCompanyLeaveName(e.target.value)}
+                placeholder="Ex. Fermeture annuelle"
+              />
+            </Field>
+            <Field label="Date de départ">
+              <input
+                required
+                type="date"
+                className={inputClass}
+                value={companyLeaveStart}
+                onChange={(e) => setCompanyLeaveStart(e.target.value)}
+              />
+            </Field>
+            <Field label="Date de retour (non décomptée)">
+              <input
+                required
+                type="date"
+                className={inputClass}
+                value={companyLeaveEnd}
+                onChange={(e) => setCompanyLeaveEnd(e.target.value)}
+              />
+            </Field>
+            <label className="flex items-center gap-2 text-sm text-zinc-700">
+              <input
+                type="checkbox"
+                className="accent-[#0088E8]"
+                checked={companyLeaveHalfDay}
+                onChange={(e) => setCompanyLeaveHalfDay(e.target.checked)}
+              />
+              Congé d&apos;une demi-journée (aucun décompte annuel ni retard ce
+              jour)
+            </label>
+            {companyLeaveHalfDay ? (
+              <Field label="Heure de départ">
+                <input
+                  required
+                  type="time"
+                  className={inputClass}
+                  value={companyLeaveLeavingTime}
+                  onChange={(e) => setCompanyLeaveLeavingTime(e.target.value)}
+                />
+              </Field>
+            ) : null}
+            {daysBetweenLocal(companyLeaveStart, companyLeaveEnd) > 0 ? (
+              <p className="text-sm text-zinc-600">
+                {companyLeaveHalfDay
+                  ? `Demi-journée avec départ à ${
+                      companyLeaveLeavingTime || "—"
+                    }, sans déduction du solde annuel.`
+                  : `${daysBetweenLocal(companyLeaveStart, companyLeaveEnd)} jour(s)`}{" "}
+                {!companyLeaveHalfDay
+                  ? "seront déduits du solde annuel de chaque employé actif. Le solde peut devenir négatif si le quota est insuffisant."
+                  : ""}
+                {companyLeaveHalfDay &&
+                daysBetweenLocal(companyLeaveStart, companyLeaveEnd) !== 1
+                  ? " Pour une demi-journée, la période doit couvrir une seule journée."
+                  : ""}
+              </p>
+            ) : null}
+            <div className="mt-2 flex justify-end gap-2">
+              {editingCompanyLeave ? (
+                <SecondaryButton
+                  type="button"
+                  disabled={creatingCompanyLeave}
+                  onClick={() => {
+                    setEditingCompanyLeave(null);
+                    setCompanyLeaveName("");
+                    setCompanyLeaveStart("");
+                    setCompanyLeaveEnd("");
+                    setCompanyLeaveHalfDay(false);
+                    setCompanyLeaveLeavingTime("");
+                    setCompanyLeaveError("");
+                  }}
+                >
+                  Annuler la modification
+                </SecondaryButton>
+              ) : null}
+              <SecondaryButton
+                type="button"
+                disabled={creatingCompanyLeave}
+                onClick={() => setShowCompanyLeave(false)}
+              >
+                Annuler
+              </SecondaryButton>
+              <PrimaryButton type="submit" disabled={creatingCompanyLeave}>
+                {creatingCompanyLeave
+                  ? "Enregistrement…"
+                  : editingCompanyLeave
+                    ? "Enregistrer les modifications"
+                    : "Créer le congé"}
+              </PrimaryButton>
             </div>
           </form>
         </Modal>

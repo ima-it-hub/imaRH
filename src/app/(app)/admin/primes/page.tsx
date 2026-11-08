@@ -66,18 +66,7 @@ export default function AdminPrimesPage() {
       (primeRows ?? []).filter(
         (row) =>
           row.employee.role === "employee" &&
-          row.calculation?.calculationVersion === 2 &&
-          row.calculation.status === "BROUILLON"
-      ),
-    [primeRows]
-  );
-  const confirmedRows = useMemo(
-    () =>
-      (primeRows ?? []).filter(
-        (row) =>
-          row.employee.role === "employee" &&
-          row.calculation?.calculationVersion === 2 &&
-          row.calculation.status === "CONFIRME"
+          row.calculation?.calculationVersion === 2
       ),
     [primeRows]
   );
@@ -85,25 +74,24 @@ export default function AdminPrimesPage() {
     (sum, row) => sum + (row.calculation?.totalAmount ?? 0),
     0
   );
-  const confirmedTotal = confirmedRows.reduce(
-    (sum, row) => sum + (row.calculation?.totalAmount ?? 0),
-    0
+  const rowsToConfirm = pendingRows.filter(
+    (row) => row.calculation?.status === "BROUILLON"
   );
 
   async function onConfirmPrimes() {
-    if (!token || pendingRows.length === 0) return;
+    if (!token || rowsToConfirm.length === 0) return;
     setBusy(true);
     setError("");
     setMsg("");
     try {
       const result = await confirmPrimes({
         token,
-        calculationIds: pendingRows.map(
+        calculationIds: rowsToConfirm.map(
           (row) => row.calculation!._id
         ),
       });
       setMsg(
-        `${result.confirmed} prime(s) confirmée(s) et créditée(s) pour ${month}/${year}.`
+        `${result.confirmed} prime(s) confirmée(s) ou mise(s) à jour pour ${month}/${year}.`
       );
     } catch (err) {
       setError(err instanceof Error ? err.message : "Erreur");
@@ -178,7 +166,8 @@ export default function AdminPrimesPage() {
               de travail lorsqu&apos;ils sont enregistrés; sinon, elles
               reprennent ceux du manager. Le recouvrement du lieu s&apos;applique
               uniquement au département « resposible showroom ». Ces calculs
-              sont préparés automatiquement.
+              sont préparés automatiquement. Les calculs confirmés restent ici
+              pour être modifiés puis confirmés à nouveau.
             </p>
           </div>
 
@@ -193,6 +182,7 @@ export default function AdminPrimesPage() {
                   <th className="pb-3 pr-3 text-right">Recouvrement</th>
                   <th className="pb-3 pr-3 text-right">Évaluation</th>
                   <th className="pb-3 pr-3 text-right">Prime calculée</th>
+                  <th className="pb-3 text-right">Statut</th>
                 </tr>
               </thead>
               <tbody>
@@ -241,12 +231,25 @@ export default function AdminPrimesPage() {
                       <td className="py-3 pr-3 text-right font-semibold">
                         {moneyDZD(calc.totalAmount)}
                       </td>
+                      <td className="py-3 text-right">
+                        <Badge
+                          className={
+                            calc.status === "CONFIRME"
+                              ? "bg-emerald-100 text-emerald-800"
+                              : "bg-amber-100 text-amber-800"
+                          }
+                        >
+                          {calc.status === "CONFIRME"
+                            ? "Confirmée"
+                            : "À confirmer"}
+                        </Badge>
+                      </td>
                     </tr>
                   );
                 })}
                 {!pendingRows.length ? (
                   <tr>
-                    <td colSpan={7} className="py-6 text-sm text-zinc-500">
+                    <td colSpan={8} className="py-6 text-sm text-zinc-500">
                       Aucune prime en attente. Enregistrez les données du lieu
                       de travail ou du manager dans Calcul des primes; les
                       employés concernés seront ajoutés automatiquement.
@@ -259,82 +262,18 @@ export default function AdminPrimesPage() {
 
           <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-zinc-100 pt-4">
             <p className="text-sm text-zinc-600">
-              {pendingRows.length} prime(s) en attente ·{" "}
+              {pendingRows.length} prime(s) · {rowsToConfirm.length} à confirmer ·{" "}
               {moneyDZD(pendingTotal)}
             </p>
             <PrimaryButton
               type="button"
-              disabled={busy || pendingRows.length === 0}
+              disabled={busy || rowsToConfirm.length === 0}
               onClick={() => void onConfirmPrimes()}
             >
               {busy
                 ? "Confirmation…"
-                : `Confirmer les primes (${month}/${year})`}
+                : `Confirmer les modifications (${month}/${year})`}
             </PrimaryButton>
-          </div>
-        </Card>
-
-        <Card className="mb-6">
-          <div className="mb-4">
-            <h2 className="font-semibold text-zinc-900">
-              Primes confirmées —{" "}
-              {new Date(year, month - 1, 1).toLocaleString("fr-DZ", {
-                month: "long",
-                year: "numeric",
-              })}
-            </h2>
-          </div>
-          <div className="overflow-x-auto">
-            <table className="min-w-full text-sm">
-              <thead className="text-xs uppercase text-zinc-500">
-                <tr>
-                  <th className="pb-3 pr-3 text-left">Employé</th>
-                  <th className="pb-3 pr-3 text-left">Données</th>
-                  <th className="pb-3 pr-3 text-left">Évaluation</th>
-                  <th className="pb-3 text-right">Prime</th>
-                </tr>
-              </thead>
-              <tbody>
-                {confirmedRows.map((row) => (
-                  <tr
-                    key={row.calculation!._id}
-                    className="border-t border-zinc-100"
-                  >
-                    <td className="py-3 pr-3 font-medium text-zinc-900">
-                      {row.employee.name}
-                    </td>
-                    <td className="py-3 pr-3">
-                      {row.calculation!.hasOwnMetrics
-                        ? "Calcul individuel"
-                        : row.calculation!.sourceWorkplaceId
-                          ? `Objectif / réalisation du lieu ${row.workplaceName}`
-                          : `Objectif / réalisation du manager ${row.managerName}`}
-                    </td>
-                    <td className="py-3 pr-3">
-                      {row.calculation!.evaluationPercent}%
-                    </td>
-                    <td className="py-3 text-right font-semibold">
-                      {moneyDZD(row.calculation!.totalAmount)}
-                    </td>
-                  </tr>
-                ))}
-                {confirmedRows.length > 0 ? (
-                  <tr className="border-t-2 border-zinc-300 bg-zinc-50 font-semibold">
-                    <td className="py-3 pr-3" colSpan={3}>
-                      Total des primes calculées
-                    </td>
-                    <td className="py-3 text-right">
-                      {moneyDZD(confirmedTotal)}
-                    </td>
-                  </tr>
-                ) : null}
-              </tbody>
-            </table>
-            {!confirmedRows.length ? (
-              <p className="py-6 text-sm text-zinc-500">
-                Aucune prime calculée confirmée pour ce mois.
-              </p>
-            ) : null}
           </div>
         </Card>
 

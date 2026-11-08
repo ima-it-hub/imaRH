@@ -1,10 +1,11 @@
-import { mutation, query, MutationCtx } from "./_generated/server";
+import { mutation, query, MutationCtx, QueryCtx } from "./_generated/server";
 import { ConvexError, v } from "convex/values";
 import { Doc, Id } from "./_generated/dataModel";
 import {
   computeDelayAmount,
   computeLateMinutes,
   computeWorkedMinutes,
+  algiersLocalToUtcMs,
   formatTimeAlgiers,
   getEmployeeSettings,
   monthBounds,
@@ -30,6 +31,46 @@ function getScans(row: Doc<"attendances"> | null): number[] {
   return legacy;
 }
 
+async function getWorkEndMsForDay(
+  ctx: QueryCtx | MutationCtx,
+  employeeId: Id<"users">,
+  date: string,
+  settings: {
+    workEndHour: number;
+    workEndMinute: number;
+    thursdayWorkEndHour: number;
+    thursdayWorkEndMinute: number;
+  }
+) {
+  const schedule = await ctx.db
+    .query("companyHalfDaySchedules")
+    .withIndex("by_date", (q) => q.eq("date", date))
+    .first();
+  if (schedule) {
+    const [hour, minute] = schedule.leavingTime.split(":").map(Number);
+    return algiersLocalToUtcMs(date, hour!, minute!);
+  }
+
+  const leaves = await ctx.db
+    .query("leaves")
+    .withIndex("by_employee", (q) => q.eq("employeeId", employeeId))
+    .collect();
+  const legacyHalfDay = leaves.find(
+    (leave) =>
+      leave.companyLeaveHalfDay === true &&
+      leave.startDate <= date &&
+      date < leave.endDate &&
+      leave.companyLeaveLeavingTime
+  );
+  if (legacyHalfDay?.companyLeaveLeavingTime) {
+    const [hour, minute] = legacyHalfDay.companyLeaveLeavingTime
+      .split(":")
+      .map(Number);
+    return algiersLocalToUtcMs(date, hour!, minute!);
+  }
+  return workEndMsForDate(settings, date);
+}
+
 async function recalculateDay(
   ctx: MutationCtx,
   employeeId: Id<"users">,
@@ -41,11 +82,58 @@ async function recalculateDay(
   if (!employee) throw new Error("Employé introuvable");
 
   const settings = await getEmployeeSettings(ctx, employee);
-  const requiredMinutes = requiredMinutesForDate(settings, date);
+  const halfDaySchedules = await ctx.db
+    .query("companyHalfDaySchedules")
+    .withIndex("by_date", (q) => q.eq("date", date))
+    .collect();
+  const halfDaySchedule = halfDaySchedules[0];
+  const leaves = await ctx.db
+    .query("leaves")
+    .withIndex("by_employee", (q) => q.eq("employeeId", employeeId))
+    .collect();
+  const legacyHalfDay = leaves.find(
+    (leave) =>
+      leave.companyLeaveHalfDay === true &&
+      leave.startDate <= date &&
+      date < leave.endDate &&
+      leave.companyLeaveLeavingTime
+  );
+  const isCompanyLeaveDay = Boolean(halfDaySchedule) || leaves.some(
+    (leave) =>
+      Boolean(leave.companyLeaveName) &&
+      leave.companyLeaveHalfDay === true &&
+      leave.startDate <= date &&
+      date < leave.endDate
+  );
+  const leavingTime =
+    halfDaySchedule?.leavingTime ?? legacyHalfDay?.companyLeaveLeavingTime;
+  const scheduledEnd = leavingTime?.match(
+    /^(\d{2}):(\d{2})$/
+  );
+  const workEndMs = await getWorkEndMsForDay(
+    ctx,
+    employeeId,
+    date,
+    settings
+  );
+  const scheduleDuration =
+    scheduledEnd && leavingTime
+      ? Number(scheduledEnd[1]) * 60 +
+        Number(scheduledEnd[2]) -
+        settings.workStartHour * 60 -
+        settings.workStartMinute
+      : undefined;
+  const requiredMinutes =
+    scheduleDuration !== undefined
+      ? Math.max(
+          0,
+          Math.min(requiredMinutesForDate(settings, date), scheduleDuration)
+        )
+      : requiredMinutesForDate(settings, date);
   const workedMinutes = computeWorkedMinutes(
     scans,
     Date.now(),
-    workEndMsForDate(settings, date)
+    workEndMs
   );
   const firstScan = [...scans].sort((a, b) => a - b)[0];
   const autoDelay = firstScan
@@ -56,8 +144,9 @@ async function recalculateDay(
         settings.lateToleranceMinutes
       )
     : 0;
-  const lateMinutes =
-    options?.lateMinutesOverride !== undefined
+  const lateMinutes = isCompanyLeaveDay
+    ? 0
+    : options?.lateMinutesOverride !== undefined
       ? Math.max(0, Math.round(options.lateMinutesOverride))
       : autoDelay;
 
@@ -88,7 +177,9 @@ async function recalculateDay(
     requiredMinutes,
     lateMinutes,
     delayAmount,
-    lateAdjustedByAdmin: options?.adminAdjusted ?? false,
+    lateAdjustedByAdmin: isCompanyLeaveDay
+      ? false
+      : (options?.adminAdjusted ?? false),
     status,
   };
 }
@@ -113,6 +204,36 @@ async function applyDayPatch(
   }
 
   return await ctx.db.get(attendanceId);
+}
+
+export async function recalculateLeaveAttendance(
+  ctx: MutationCtx,
+  employeeId: Id<"users">,
+  ranges: { startDate: string; endDate: string }[]
+) {
+  const rows = await ctx.db
+    .query("attendances")
+    .withIndex("by_employee", (q) => q.eq("employeeId", employeeId))
+    .collect();
+  for (const row of rows) {
+    if (
+      !ranges.some(
+        (range) => row.date >= range.startDate && row.date < range.endDate
+      )
+    ) {
+      continue;
+    }
+    const computed = await recalculateDay(
+      ctx,
+      employeeId,
+      row.date,
+      getScans(row),
+      row.lateAdjustedByAdmin
+        ? { lateMinutesOverride: row.lateMinutes, adminAdjusted: true }
+        : undefined
+    );
+    await applyDayPatch(ctx, employeeId, row.date, row._id, computed);
+  }
 }
 
 /** Ignore only true double-taps / re-sent identical punches (not in→out pairs). */
@@ -248,7 +369,7 @@ export const myToday = query({
       workedMinutes: computeWorkedMinutes(
         scans,
         Date.now(),
-        workEndMsForDate(settings, date)
+        await getWorkEndMsForDay(ctx, user._id, date, settings)
       ),
       isWorking: scans.length % 2 === 1,
     };
@@ -261,7 +382,31 @@ export const myWorkSchedule = query({
     const user = await requireUser(ctx, args.token);
     const date = todayISO();
     const settings = await getEmployeeSettings(ctx, user);
-    const end = workEndForDate(settings, date);
+    const schedule = await ctx.db
+      .query("companyHalfDaySchedules")
+      .withIndex("by_date", (q) => q.eq("date", date))
+      .first();
+    const [scheduleHour, scheduleMinute] = (schedule?.leavingTime ?? "").split(
+      ":"
+    );
+    const end = schedule
+      ? {
+          hour: Number(scheduleHour),
+          minute: Number(scheduleMinute),
+        }
+      : workEndForDate(settings, date);
+    const requiredMinutes = schedule
+      ? Math.max(
+          0,
+          Math.min(
+            requiredMinutesForDate(settings, date),
+            end.hour * 60 +
+              end.minute -
+              settings.workStartHour * 60 -
+              settings.workStartMinute
+          )
+        )
+      : requiredMinutesForDate(settings, date);
     const formatTime = (hour: number, minute: number) =>
       `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
 
@@ -269,7 +414,7 @@ export const myWorkSchedule = query({
       workplace: user.workplace || "Lieu non défini",
       startTime: formatTime(settings.workStartHour, settings.workStartMinute),
       endTime: formatTime(end.hour, end.minute),
-      requiredWorkMinutes: requiredMinutesForDate(settings, date),
+      requiredWorkMinutes: requiredMinutes,
       lateToleranceMinutes: settings.lateToleranceMinutes,
     };
   },
@@ -335,7 +480,7 @@ export const listByDate = query({
           computeWorkedMinutes(
             scans,
             Date.now(),
-            workEndMsForDate(settings, row.date)
+            await getWorkEndMsForDay(ctx, row.employeeId, row.date, settings)
           ),
         delayAmount: row.delayAmount ?? 0,
         employee: publicUser(employee),

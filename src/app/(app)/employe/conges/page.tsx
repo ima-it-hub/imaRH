@@ -227,7 +227,17 @@ export default function CongesPage() {
                 >
                   <div className="flex items-start justify-between gap-2">
                     <p className="font-medium capitalize text-zinc-900">
-                      {leave.type.replace("_", " ")}
+                      {leave.companyLeaveName
+                        ? `Congé collectif · ${leave.companyLeaveName}${
+                            leave.companyLeaveHalfDay
+                              ? ` · ½ journée${
+                                  leave.companyLeaveLeavingTime
+                                    ? ` · départ ${leave.companyLeaveLeavingTime}`
+                                    : ""
+                                }`
+                              : ""
+                          }`
+                        : leave.type.replace("_", " ")}
                     </p>
                     <Badge className={statusBadgeClass(leave.status)}>
                       {leaveStatusLabel(leave.status)}
@@ -251,7 +261,9 @@ export default function CongesPage() {
                     <div className="flex justify-between gap-3">
                       <dt className="text-zinc-500">Jours</dt>
                       <dd className="text-right font-medium text-zinc-900">
-                        {leave.deductedDays != null
+                        {leave.companyLeaveHalfDay
+                          ? "½ journée non décomptée"
+                          : leave.deductedDays != null
                           ? `${leave.deductedDays} décomptés`
                           : `${leave.days} demandés`}
                       </dd>
@@ -291,7 +303,17 @@ export default function CongesPage() {
                   {(leaves ?? []).map((leave) => (
                     <tr key={leave._id} className="border-t border-zinc-100">
                       <td className="py-3 pr-3 font-medium capitalize text-zinc-900">
-                        {leave.type.replace("_", " ")}
+                        {leave.companyLeaveName
+                          ? `Congé collectif · ${leave.companyLeaveName}${
+                              leave.companyLeaveHalfDay
+                                ? ` · ½ journée${
+                                    leave.companyLeaveLeavingTime
+                                      ? ` · départ ${leave.companyLeaveLeavingTime}`
+                                      : ""
+                                  }`
+                                : ""
+                            }`
+                          : leave.type.replace("_", " ")}
                       </td>
                       <td className="py-3 pr-3 whitespace-nowrap text-zinc-600">
                         {leave.startDate} → {leave.endDate}
@@ -302,7 +324,9 @@ export default function CongesPage() {
                           : "—"}
                       </td>
                       <td className="py-3 pr-3 text-right text-zinc-900">
-                        {leave.deductedDays != null
+                        {leave.companyLeaveHalfDay
+                          ? "½ journée non décomptée"
+                          : leave.deductedDays != null
                           ? `${leave.deductedDays} décomptés`
                           : `${leave.days} demandés`}
                       </td>

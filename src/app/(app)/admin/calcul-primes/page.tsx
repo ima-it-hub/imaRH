@@ -58,7 +58,7 @@ export default function AdminCalculPrimesPage() {
       result[row.employee._id] = {
         selected: calc?.calculationVersion === 2 && calc.hasOwnMetrics === true,
         objective:
-          calc?.calculationVersion === 2 && calc.hasOwnMetrics === true
+          calc?.calculationVersion === 2
             ? String(calc.objective)
             : row.previousMonthObjective !== null
               ? String(row.previousMonthObjective)
@@ -106,9 +106,7 @@ export default function AdminCalculPrimesPage() {
   }, [workplaceRows, workplaceOverrides]);
 
   const selectedCount = (rows ?? []).filter(
-    (row) =>
-      drafts[row.employee._id]?.selected &&
-      row.calculation?.status !== "CONFIRME"
+    (row) => drafts[row.employee._id]?.selected
   ).length;
   const selectedRows = (rows ?? []).filter(
     (row) => drafts[row.employee._id]?.selected
@@ -116,12 +114,10 @@ export default function AdminCalculPrimesPage() {
   const availableToAdd = (rows ?? []).filter(
     (row) =>
       !drafts[row.employee._id]?.selected &&
-      row.calculation?.status !== "CONFIRME" &&
       (row.employee.role !== "employee" || row.employee.baseBonus > 0)
   );
   const hasSelectionChanges = (rows ?? []).some(
     (row) =>
-      row.calculation?.status !== "CONFIRME" &&
       (row.calculation?.hasOwnMetrics === true) !==
         (drafts[row.employee._id]?.selected === true)
   );
@@ -188,9 +184,7 @@ export default function AdminCalculPrimesPage() {
   async function onSave() {
     if (!token || !rows || !workplaceRows) return;
     const selectedRows = rows.filter(
-      (row) =>
-        drafts[row.employee._id]?.selected &&
-        row.calculation?.status !== "CONFIRME"
+      (row) => drafts[row.employee._id]?.selected
     );
     if (
       !selectedRows.length &&
@@ -549,7 +543,6 @@ export default function AdminCalculPrimesPage() {
                                 step="0.01"
                                 className="w-full min-w-0 rounded-lg border border-zinc-200 px-2 py-2 tabular-nums"
                                 value={draft[field]}
-                                disabled={confirmed}
                                 onChange={(e) =>
                                   updateDraft(id, field, e.target.value)
                                 }
@@ -612,7 +605,7 @@ export default function AdminCalculPrimesPage() {
                         )}
                       </td>
                       <td className="p-3 text-right">
-                        {selected && !confirmed ? (
+                        {selected ? (
                           <button
                             type="button"
                             aria-label={`Supprimer ${row.employee.name} du calcul individuel`}

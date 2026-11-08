@@ -19,6 +19,21 @@ type SalaryDraft = {
   baseSalary: string;
 };
 
+type SalarySelection = {
+  period: string;
+  deselected: Record<string, boolean>;
+};
+
+function isEmployeeSelected(
+  employeeId: string,
+  selection: SalarySelection,
+  period: string
+) {
+  return (
+    selection.period !== period || selection.deselected[employeeId] !== true
+  );
+}
+
 function monthAmountFromDraft(
   contractual: number,
   proration?: {
@@ -49,6 +64,10 @@ export default function AdminSalairesPage() {
   const [salaryDrafts, setSalaryDrafts] = useState<Record<string, SalaryDraft>>(
     {}
   );
+  const [selection, setSelection] = useState<SalarySelection>({
+    period: "",
+    deselected: {},
+  });
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
   const [error, setError] = useState("");
@@ -57,6 +76,7 @@ export default function AdminSalairesPage() {
     api.finances.salariesForMonth,
     token ? { token, month, year } : "skip"
   );
+  const period = `${year}-${month}`;
   useEffect(() => {
     if (!monthRows) return;
     const nextSalaries: Record<string, SalaryDraft> = {};
@@ -83,13 +103,18 @@ export default function AdminSalairesPage() {
 
   const totalDraft = useMemo(() => {
     return (monthRows ?? []).reduce((sum, row) => {
+      if (!isEmployeeSelected(row.employee._id, selection, period)) return sum;
       const draft = salaryDrafts[row.employee._id];
       const contractual = Number(draft?.baseSalary) || 0;
       const monthPay = monthAmountFromDraft(contractual, row.proration);
       const leave = leaveDeductionByEmployee[row.employee._id] ?? 0;
       return sum + Math.max(0, monthPay - leave);
     }, 0);
-  }, [monthRows, salaryDrafts, leaveDeductionByEmployee]);
+  }, [monthRows, salaryDrafts, leaveDeductionByEmployee, selection, period]);
+
+  const selectedCount = (monthRows ?? []).filter(
+    (row) => isEmployeeSelected(row.employee._id, selection, period)
+  ).length;
 
   const definedSalaries = useMemo(() => {
     return (monthRows ?? []).filter((row) => row.salary != null);
@@ -120,15 +145,24 @@ export default function AdminSalairesPage() {
     setError("");
     setMsg("");
     try {
-      const entries = monthRows.map((row) => {
-        const draft = salaryDrafts[row.employee._id] ?? {
-          baseSalary: "0",
-        };
-        return {
-          employeeId: row.employee._id as Id<"users">,
-          baseSalary: Number(draft.baseSalary) || 0,
-        };
-      });
+      const entries = monthRows
+        .filter((row) =>
+          isEmployeeSelected(row.employee._id, selection, period)
+        )
+        .map((row) => {
+          const draft = salaryDrafts[row.employee._id] ?? {
+            baseSalary: "0",
+          };
+          return {
+            employeeId: row.employee._id as Id<"users">,
+            baseSalary: Number(draft.baseSalary) || 0,
+          };
+        });
+
+      if (!entries.length) {
+        setError("Sélectionnez au moins un employé à confirmer.");
+        return;
+      }
 
       const result = await setSalariesBatch({
         token,
@@ -202,6 +236,29 @@ export default function AdminSalairesPage() {
               <table className="min-w-full text-sm">
                 <thead className="text-xs uppercase text-zinc-500">
                   <tr>
+                    <th className="pb-3 pr-3 text-center">
+                      <input
+                        type="checkbox"
+                        aria-label="Sélectionner tous les employés"
+                        checked={
+                          Boolean(monthRows?.length) &&
+                          selectedCount === monthRows?.length
+                        }
+                        onChange={(e) => {
+                          const checked = e.target.checked;
+                          setSelection({
+                            period,
+                            deselected: Object.fromEntries(
+                              (monthRows ?? []).map((row) => [
+                                row.employee._id,
+                                !checked,
+                              ])
+                            ),
+                          });
+                        }}
+                        className="h-4 w-4 accent-[#0088E8]"
+                      />
+                    </th>
                     <th className="pb-3 pr-3 text-left">Employé</th>
                     <th className="pb-3 pr-3 text-left">Département</th>
                     <th className="pb-3 pr-3 text-left">
@@ -233,6 +290,30 @@ export default function AdminSalairesPage() {
                         key={row.employee._id}
                         className="border-t border-zinc-100"
                       >
+                        <td className="py-3 pr-3 text-center">
+                          <input
+                            type="checkbox"
+                            aria-label={`Confirmer le salaire de ${row.employee.name}`}
+                            checked={isEmployeeSelected(
+                              row.employee._id,
+                              selection,
+                              period
+                            )}
+                            onChange={(e) => {
+                              const checked = e.target.checked;
+                              setSelection((previous) => ({
+                                period,
+                                deselected: {
+                                  ...(previous.period === period
+                                    ? previous.deselected
+                                    : {}),
+                                  [row.employee._id]: !checked,
+                                },
+                              }));
+                            }}
+                            className="h-4 w-4 accent-[#0088E8]"
+                          />
+                        </td>
                         <td className="py-3 pr-3">
                           <p className="font-medium text-zinc-900">
                             {row.employee.name}
@@ -299,13 +380,17 @@ export default function AdminSalairesPage() {
 
             <div className="mt-4 flex flex-col gap-3 border-t border-zinc-100 pt-4 sm:flex-row sm:items-center sm:justify-between">
               <p className="text-sm text-zinc-600">
-                Masse salariale nette :{" "}
+                {selectedCount} employé(s) sélectionné(s) · Masse salariale
+                nette sélectionnée :{" "}
                 <strong className="text-zinc-900">{moneyDZD(totalDraft)}</strong>
               </p>
-              <PrimaryButton type="submit" disabled={busy || !monthRows?.length}>
+              <PrimaryButton
+                type="submit"
+                disabled={busy || !monthRows?.length || selectedCount === 0}
+              >
                 {busy
                   ? "Enregistrement…"
-                  : `Enregistrer salaires (${month}/${year})`}
+                  : `Confirmer les salaires sélectionnés (${selectedCount})`}
               </PrimaryButton>
             </div>
           </form>

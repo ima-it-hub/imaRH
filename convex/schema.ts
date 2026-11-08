@@ -177,6 +177,9 @@ export default defineSchema({
 
   leaves: defineTable({
     employeeId: v.id("users"),
+    companyLeaveName: v.optional(v.string()),
+    companyLeaveHalfDay: v.optional(v.boolean()),
+    companyLeaveLeavingTime: v.optional(v.string()),
     type: v.union(
       v.literal("annuel"),
       v.literal("maladie"),
@@ -219,6 +222,14 @@ export default defineSchema({
   })
     .index("by_employee", ["employeeId"])
     .index("by_status", ["status"]),
+
+  companyHalfDaySchedules: defineTable({
+    name: v.string(),
+    date: v.string(),
+    leavingTime: v.string(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  }).index("by_date", ["date"]),
 
   salaries: defineTable({
     employeeId: v.id("users"),
