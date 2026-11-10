@@ -296,10 +296,22 @@ export default function AdminOrdresPaiementPage() {
             </div>
           </div>
           {filterEmployeeId && employeeHistory ? (
-            <p className="mt-3 text-sm text-zinc-600">
-              Solde {employeeHistory.employee.name} :{" "}
-              <strong>{moneyDZD(employeeHistory.balance.available)}</strong>
-            </p>
+            <div className="mt-3 space-y-1 text-sm text-zinc-600">
+              <p>
+                Solde {employeeHistory.employee.name} :{" "}
+                <strong>{moneyDZD(employeeHistory.balance.available)}</strong>
+              </p>
+              {employeeHistory.annualLeaveSettlements.map((settlement) => (
+                <p key={settlement._id}>
+                  Régularisation congés {settlement.year} (
+                  {settlement.kind === "YEAR_END" ? "fin d'année" : "départ"}) :{" "}
+                  <strong>
+                    {settlement.amount < 0 ? "−" : "+"}
+                    {moneyDZD(Math.abs(settlement.amount))}
+                  </strong>
+                </p>
+              ))}
+            </div>
           ) : null}
         </Card>
 

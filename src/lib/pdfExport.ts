@@ -1,4 +1,4 @@
-import { leaveStatusLabel, moneyDZD } from "@/lib/format";
+import { leaveStatusLabel, leaveTypeLabel, moneyDZD } from "@/lib/format";
 
 function escapeHtml(value: string) {
   return value
@@ -383,7 +383,7 @@ export function printLeaveHistory(args: {
       : args.leaves
           .map(
             (leave) => `<tr>
-              <td>${escapeHtml(leave.type)}</td>
+              <td>${escapeHtml(leaveTypeLabel(leave.type))}</td>
               <td>${escapeHtml(leave.startDate)}</td>
               <td>${escapeHtml(leave.endDate)}</td>
               <td class="num">${leave.days}</td>

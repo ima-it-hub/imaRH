@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useMemo, useState } from "react";
 import { useMutation, useQuery } from "convex/react";
 import { api } from "../../../../../convex/_generated/api";
 import type { Id } from "../../../../../convex/_generated/dataModel";
@@ -16,6 +16,15 @@ import {
 import { useAuth } from "@/lib/auth";
 import { formatDate } from "@/lib/format";
 
+function mondayDateInput() {
+  const date = new Date();
+  date.setDate(date.getDate() - ((date.getDay() + 6) % 7));
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
 export default function EmployeeReportsPage() {
   const { token } = useAuth();
   const reports = useQuery(api.reports.myReports, token ? { token } : "skip");
@@ -25,31 +34,76 @@ export default function EmployeeReportsPage() {
     token ? { token } : "skip"
   );
   const publish = useMutation(api.reports.publish);
+  const saveWeeklyEvaluation = useMutation(api.reports.saveWeeklyEvaluation);
 
   const [year, setYear] = useState(new Date().getFullYear());
   const [month, setMonth] = useState(0);
-  const [tab, setTab] = useState<"mine" | "team">("mine");
-
+  const [selectedTab, setSelectedTab] = useState<"mine" | "team" | null>(
+    null
+  );
   const now = new Date();
   const [employeeId, setEmployeeId] = useState("");
   const [evalMonth, setEvalMonth] = useState(String(now.getMonth() + 1));
   const [evalYear, setEvalYear] = useState(String(now.getFullYear()));
   const [adminReport, setAdminReport] = useState("");
   const [employeeReport, setEmployeeReport] = useState("");
-  const [scores, setScores] = useState<Record<string, number>>({});
+  const [monthlyScoreDraft, setMonthlyScoreDraft] = useState<{
+    key: string;
+    scores: Record<string, number>;
+  } | null>(null);
+  const [weeklyScoreDraft, setWeeklyScoreDraft] = useState<{
+    key: string;
+    scores: Record<string, number>;
+  } | null>(null);
+  const [weeklyMessageDraft, setWeeklyMessageDraft] = useState<{
+    key: string;
+    message: string;
+  } | null>(null);
+  const [evaluationMode, setEvaluationMode] = useState<"weekly" | "monthly">(
+    "weekly"
+  );
+  const [weekStart, setWeekStart] = useState(mondayDateInput);
   const [msg, setMsg] = useState("");
   const [error, setError] = useState("");
 
   const isManager = (team?.length ?? 0) > 0;
-
-  useEffect(() => {
-    if (isManager) setTab("team");
-  }, [isManager]);
+  const tab = selectedTab ?? (isManager ? "team" : "mine");
 
   const conditions = useQuery(
     api.reports.conditionsForEmployee,
     token && employeeId
       ? { token, employeeId: employeeId as Id<"users"> }
+      : "skip"
+  );
+  const weekEvaluation = useQuery(
+    api.reports.managerWeeklyEvaluation,
+    token &&
+      employeeId &&
+      evaluationMode === "weekly" &&
+      weekStart &&
+      new Date(`${weekStart}T00:00:00Z`).getUTCDay() === 1
+      ? {
+          token,
+          employeeId: employeeId as Id<"users">,
+          weekStart,
+        }
+      : "skip"
+  );
+  const weeklyAverage = useQuery(
+    api.reports.monthlyWeeklyAverage,
+    token &&
+      employeeId &&
+      evaluationMode === "monthly" &&
+      Number.isInteger(Number(evalMonth)) &&
+      Number(evalMonth) >= 1 &&
+      Number(evalMonth) <= 12 &&
+      Number.isInteger(Number(evalYear))
+      ? {
+          token,
+          employeeId: employeeId as Id<"users">,
+          month: Number(evalMonth),
+          year: Number(evalYear),
+        }
       : "skip"
   );
 
@@ -58,15 +112,41 @@ export default function EmployeeReportsPage() {
     [team, employeeId]
   );
 
-  useEffect(() => {
-    if (!conditions) return;
-    const next: Record<string, number> = {};
-    for (const c of conditions) {
-      next[c._id] = scores[c._id] ?? 3;
-    }
-    setScores(next);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [conditions]);
+  const weeklyScoreKey = `${employeeId}:${weekStart}`;
+  const weeklyAdminMessage =
+    weeklyMessageDraft?.key === weeklyScoreKey
+      ? weeklyMessageDraft.message
+      : weekEvaluation?.adminMessage ?? "";
+  const weeklyScores = useMemo(() => {
+    if (weeklyScoreDraft?.key === weeklyScoreKey) return weeklyScoreDraft.scores;
+    const savedScores = new Map(
+      (weekEvaluation?.scores ?? []).map((score) => [
+        score.conditionId,
+        score.points,
+      ])
+    );
+    return Object.fromEntries(
+      (conditions ?? []).map((condition) => [
+        condition._id,
+        savedScores.get(condition._id) ?? 3,
+      ])
+    );
+  }, [conditions, weekEvaluation, weeklyScoreDraft, weeklyScoreKey]);
+  const monthlyScoreKey = `${employeeId}:${evalYear}:${evalMonth}:${JSON.stringify(
+    weeklyAverage?.scores ?? []
+  )}`;
+  const scores = useMemo(
+    () =>
+      monthlyScoreDraft?.key === monthlyScoreKey
+        ? monthlyScoreDraft.scores
+        : Object.fromEntries(
+            (weeklyAverage?.scores ?? []).map((score) => [
+              score.conditionId,
+              Math.min(5, Math.max(1, Math.round(score.points))),
+            ])
+          ),
+    [monthlyScoreDraft, monthlyScoreKey, weeklyAverage]
+  );
 
   const previewPct = useMemo(() => {
     const scoredConditions = (conditions ?? []).filter(
@@ -99,7 +179,22 @@ export default function EmployeeReportsPage() {
     e.preventDefault();
     if (!token || !employeeId) return;
     setError("");
+    setMsg("");
     try {
+      if (evaluationMode === "weekly") {
+        await saveWeeklyEvaluation({
+          token,
+          employeeId: employeeId as Id<"users">,
+          weekStart,
+          adminMessage: weeklyAdminMessage,
+          scores: Object.entries(weeklyScores).map(([conditionId, points]) => ({
+            conditionId: conditionId as Id<"evaluationConditions">,
+            points,
+          })),
+        });
+        setMsg("Évaluation semaine envoyée à l'admin pour confirmation.");
+        return;
+      }
       await publish({
         token,
         employeeId: employeeId as Id<"users">,
@@ -134,7 +229,7 @@ export default function EmployeeReportsPage() {
           <div className="mb-4 flex gap-2">
             <button
               type="button"
-              onClick={() => setTab("team")}
+              onClick={() => setSelectedTab("team")}
               className={`rounded-xl px-4 py-2 text-sm font-medium ${
                 tab === "team"
                   ? "bg-[#0088E8] text-white"
@@ -145,7 +240,7 @@ export default function EmployeeReportsPage() {
             </button>
             <button
               type="button"
-              onClick={() => setTab("mine")}
+              onClick={() => setSelectedTab("mine")}
               className={`rounded-xl px-4 py-2 text-sm font-medium ${
                 tab === "mine"
                   ? "bg-[#0088E8] text-white"
@@ -179,28 +274,111 @@ export default function EmployeeReportsPage() {
                   </select>
                 </Field>
                 <div className="grid grid-cols-2 gap-2">
-                  <Field label="Mois">
-                    <input
-                      className={inputClass}
-                      value={evalMonth}
-                      onChange={(e) => setEvalMonth(e.target.value)}
-                    />
-                  </Field>
-                  <Field label="Année">
-                    <input
-                      className={inputClass}
-                      value={evalYear}
-                      onChange={(e) => setEvalYear(e.target.value)}
-                    />
-                  </Field>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEvaluationMode("weekly");
+                      setError("");
+                      setMsg("");
+                    }}
+                    className={`rounded-xl px-3 py-2 text-sm font-medium ${
+                      evaluationMode === "weekly"
+                        ? "bg-[#0088E8] text-white"
+                        : "bg-zinc-100 text-zinc-700"
+                    }`}
+                  >
+                    Évaluation semaine
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEvaluationMode("monthly");
+                      setError("");
+                      setMsg("");
+                    }}
+                    className={`rounded-xl px-3 py-2 text-sm font-medium ${
+                      evaluationMode === "monthly"
+                        ? "bg-[#0088E8] text-white"
+                        : "bg-zinc-100 text-zinc-700"
+                    }`}
+                  >
+                    Rapport mensuel
+                  </button>
                 </div>
+                {evaluationMode === "weekly" ? (
+                  <Field label="Semaine (lundi)">
+                    <input
+                      type="date"
+                      required
+                      className={inputClass}
+                      value={weekStart}
+                      onChange={(e) => setWeekStart(e.target.value)}
+                    />
+                    {weekStart &&
+                    new Date(`${weekStart}T00:00:00Z`).getUTCDay() !== 1 ? (
+                      <p className="mt-1 text-xs text-red-600">
+                        Sélectionnez le lundi de la semaine.
+                      </p>
+                    ) : null}
+                  </Field>
+                ) : (
+                  <div className="grid grid-cols-2 gap-2">
+                    <Field label="Mois">
+                      <select
+                        className={inputClass}
+                        value={evalMonth}
+                        onChange={(e) => setEvalMonth(e.target.value)}
+                      >
+                        {Array.from({ length: 12 }, (_, index) => (
+                          <option key={index + 1} value={index + 1}>
+                            {new Date(2000, index, 1).toLocaleString("fr-DZ", {
+                              month: "long",
+                            })}
+                          </option>
+                        ))}
+                      </select>
+                    </Field>
+                    <Field label="Année">
+                      <input
+                        type="number"
+                        min={2000}
+                        className={inputClass}
+                        value={evalYear}
+                        onChange={(e) => setEvalYear(e.target.value)}
+                      />
+                    </Field>
+                  </div>
+                )}
 
-                {selected && Object.keys(scores).length > 0 ? (
+                {evaluationMode === "monthly" &&
+                weeklyAverage &&
+                weeklyAverage.weekCount > 0 ? (
                   <p className="rounded-xl bg-zinc-50 px-3 py-2 text-xs text-zinc-600">
-                    Score estimé : <strong>{previewPct}%</strong>
-                    {selected.department
+                    Moyenne de {weeklyAverage.weekCount} semaine(s) :{" "}
+                    <strong>{weeklyAverage.percentage}%</strong>
+                    {selected?.department
                       ? ` · ${selected.department}`
                       : ""}
+                  </p>
+                ) : null}
+                {evaluationMode === "monthly" &&
+                weeklyAverage &&
+                weeklyAverage.weekCount === 0 ? (
+                  <p className="rounded-xl bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                    Aucune évaluation semaine confirmée pour ce mois.
+                    L&apos;admin doit confirmer les évaluations semaine avant le
+                    rapport mensuel.
+                  </p>
+                ) : null}
+                {evaluationMode === "weekly" &&
+                selected &&
+                Object.keys(weeklyScores).length > 0 ? (
+                  <p className="rounded-xl bg-zinc-50 px-3 py-2 text-xs text-zinc-600">
+                    {weekEvaluation?.status === "CONFIRME"
+                      ? "Cette évaluation semaine est confirmée et ne peut plus être modifiée."
+                      : weekEvaluation
+                        ? "En attente de confirmation. Vous pouvez encore modifier cette évaluation semaine."
+                        : "L'évaluation semaine sera envoyée à l'admin pour confirmation."}
                   </p>
                 ) : null}
 
@@ -211,83 +389,200 @@ export default function EmployeeReportsPage() {
                   </p>
                 ) : null}
 
-                {(conditions ?? []).map((c) => (
-                  <fieldset
-                    key={c._id}
-                    className="rounded-xl border border-zinc-200 p-4"
-                  >
-                    <legend className="px-1 text-sm font-semibold text-zinc-900">
-                      {c.label}
-                    </legend>
-                    {c.description ? (
-                      <p className="mb-3 text-sm leading-5 text-zinc-600">
-                        {c.description}
-                      </p>
-                    ) : null}
-                    <div
-                      className="flex flex-wrap gap-2"
-                      role="radiogroup"
-                      aria-label={`Note pour ${c.label}`}
+                {(conditions ?? []).map((c) =>
+                  evaluationMode === "weekly" ? (
+                    <fieldset
+                      key={c._id}
+                      className="rounded-xl border border-zinc-200 p-4"
                     >
-                      {[1, 2, 3, 4, 5].map((n) => (
-                        <label
-                          key={n}
-                          className={`flex min-w-12 cursor-pointer items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-sm transition ${
-                            (scores[c._id] ?? 3) === n
-                              ? "border-[#0088E8] bg-[#0088E8]/10 font-semibold text-[#0074c7]"
-                              : "border-zinc-200 text-zinc-600 hover:bg-zinc-50"
-                          }`}
-                        >
-                          <input
-                            type="radio"
-                            name={`score-${c._id}`}
-                            value={n}
-                            checked={(scores[c._id] ?? 3) === n}
-                            onChange={() =>
-                              setScores((prev) => ({
-                                ...prev,
-                                [c._id]: n,
-                              }))
-                            }
-                            className="accent-[#0088E8]"
-                            aria-label={`${n} sur 5`}
-                          />
-                          <span>{n}</span>
-                        </label>
-                      ))}
-                    </div>
-                    <p className="mt-2 text-xs text-zinc-500">Note sur 5</p>
-                  </fieldset>
-                ))}
+                      <legend className="px-1 text-sm font-semibold text-zinc-900">
+                        {c.label}
+                      </legend>
+                      {c.description ? (
+                        <p className="mb-3 text-sm leading-5 text-zinc-600">
+                          {c.description}
+                        </p>
+                      ) : null}
+                      <div
+                        className="flex flex-wrap gap-2"
+                        role="radiogroup"
+                        aria-label={`Note pour ${c.label}`}
+                      >
+                        {[1, 2, 3, 4, 5].map((n) => (
+                          <label
+                            key={n}
+                            className={`flex min-w-12 cursor-pointer items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-sm transition ${
+                              (weeklyScores[c._id] ?? 3) === n
+                                ? "border-[#0088E8] bg-[#0088E8]/10 font-semibold text-[#0074c7]"
+                                : "border-zinc-200 text-zinc-600 hover:bg-zinc-50"
+                            }`}
+                          >
+                            <input
+                              type="radio"
+                              name={`score-${c._id}`}
+                              value={n}
+                              checked={(weeklyScores[c._id] ?? 3) === n}
+                              disabled={
+                                weekEvaluation?.status === "CONFIRME"
+                              }
+                              onChange={() =>
+                                setWeeklyScoreDraft({
+                                  key: weeklyScoreKey,
+                                  scores: { ...weeklyScores, [c._id]: n },
+                                })
+                              }
+                              className="accent-[#0088E8]"
+                              aria-label={`${n} sur 5`}
+                            />
+                            <span>{n}</span>
+                          </label>
+                        ))}
+                      </div>
+                      <p className="mt-2 text-xs text-zinc-500">Note sur 5</p>
+                    </fieldset>
+                  ) : (
+                    <fieldset
+                      key={c._id}
+                      className="rounded-xl border border-zinc-200 p-4"
+                    >
+                      <legend className="px-1 text-sm font-semibold text-zinc-900">
+                        {c.label}
+                      </legend>
+                      {c.description ? (
+                        <p className="mb-2 text-sm leading-5 text-zinc-600">
+                          {c.description}
+                        </p>
+                      ) : null}
+                      <p className="mb-3 text-xs text-zinc-500">
+                        Moyenne hebdomadaire :{" "}
+                        <strong>
+                          {weeklyAverage?.scores
+                            .find((score) => score.conditionId === c._id)
+                            ?.points.toFixed(1) ?? "—"}
+                          /5
+                        </strong>
+                        {" · Note mensuelle arrondie : "}
+                        <strong>{scores[c._id] ?? "—"}/5</strong>
+                      </p>
+                      <div
+                        className="flex flex-wrap gap-2"
+                        role="radiogroup"
+                        aria-label={`Note mensuelle pour ${c.label}`}
+                      >
+                        {[1, 2, 3, 4, 5].map((n) => (
+                          <label
+                            key={n}
+                            className={`flex min-w-12 cursor-pointer items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-sm transition ${
+                              scores[c._id] === n
+                                ? "border-[#0088E8] bg-[#0088E8]/10 font-semibold text-[#0074c7]"
+                                : "border-zinc-200 text-zinc-600 hover:bg-zinc-50"
+                            }`}
+                          >
+                            <input
+                              type="radio"
+                              name={`monthly-score-${c._id}`}
+                              value={n}
+                              checked={scores[c._id] === n}
+                              onChange={() =>
+                                setMonthlyScoreDraft({
+                                  key: monthlyScoreKey,
+                                  scores: { ...scores, [c._id]: n },
+                                })
+                              }
+                              className="accent-[#0088E8]"
+                              aria-label={`${n} sur 5`}
+                            />
+                            <span>{n}</span>
+                          </label>
+                        ))}
+                      </div>
+                      <p className="mt-2 text-xs text-zinc-500">
+                        Choisissez la note mensuelle sur 5.
+                      </p>
+                    </fieldset>
+                  )
+                )}
 
-                <Field label="Rapport pour l'admin">
-                  <textarea
-                    required
-                    rows={4}
-                    className={inputClass}
-                    value={adminReport}
-                    onChange={(e) => setAdminReport(e.target.value)}
-                  />
-                </Field>
-                <Field label="Rapport pour l'employé">
-                  <textarea
-                    required
-                    rows={4}
-                    className={inputClass}
-                    value={employeeReport}
-                    onChange={(e) => setEmployeeReport(e.target.value)}
-                  />
-                </Field>
+                {evaluationMode === "weekly" ? (
+                  <Field label="Message pour l'admin">
+                    <textarea
+                      required
+                      rows={3}
+                      className={inputClass}
+                      value={weeklyAdminMessage}
+                      disabled={weekEvaluation?.status === "CONFIRME"}
+                      placeholder="Ajoutez un commentaire concernant cette évaluation semaine."
+                      onChange={(e) =>
+                        setWeeklyMessageDraft({
+                          key: weeklyScoreKey,
+                          message: e.target.value,
+                        })
+                      }
+                    />
+                  </Field>
+                ) : null}
+
+                {evaluationMode === "monthly" ? (
+                  <>
+                    <p className="rounded-xl bg-zinc-50 px-3 py-2 text-xs text-zinc-600">
+                      Modifiez les moyennes par condition si nécessaire.
+                      L&apos;employé ne verra ce bilan qu&apos;après confirmation de
+                      l&apos;admin. Score calculé : <strong>{previewPct}%</strong>
+                    </p>
+                    <Field label="Rapport pour l'admin">
+                      <textarea
+                        required
+                        rows={4}
+                        className={inputClass}
+                        value={adminReport}
+                        onChange={(e) => setAdminReport(e.target.value)}
+                      />
+                    </Field>
+                    <Field label="Rapport pour l'employé">
+                      <textarea
+                        required
+                        rows={4}
+                        className={inputClass}
+                        value={employeeReport}
+                        onChange={(e) => setEmployeeReport(e.target.value)}
+                      />
+                    </Field>
+                  </>
+                ) : null}
 
                 {error ? <p className="text-sm text-red-600">{error}</p> : null}
                 {msg ? <p className="text-sm text-emerald-600">{msg}</p> : null}
-                <PrimaryButton type="submit" className="w-full">
-                  Soumettre à l&apos;admin
+                <PrimaryButton
+                  type="submit"
+                  className="w-full"
+                  disabled={
+                    evaluationMode === "monthly" &&
+                    (!conditions?.length ||
+                      !weeklyAverage?.weekCount ||
+                      (conditions ?? []).some(
+                        (condition) => !scores[condition._id]
+                      ))
+                    || (evaluationMode === "weekly" &&
+                      (!weekStart ||
+                        new Date(`${weekStart}T00:00:00Z`).getUTCDay() !== 1 ||
+                        weekEvaluation === undefined ||
+                        !conditions?.length ||
+                        !weeklyAdminMessage.trim() ||
+                        weekEvaluation?.status === "CONFIRME"))
+                  }
+                >
+                  {evaluationMode === "weekly"
+                    ? weekEvaluation?.status === "CONFIRME"
+                      ? "Évaluation semaine confirmée"
+                      : "Envoyer l'évaluation semaine"
+                    : "Soumettre à l'admin"}
                 </PrimaryButton>
-                <p className="text-xs text-zinc-500">
-                  L&apos;employé ne verra l&apos;évaluation qu&apos;après
-                  confirmation par l&apos;admin RH.
-                </p>
+                {evaluationMode === "monthly" ? (
+                  <p className="text-xs text-zinc-500">
+                    L&apos;employé ne verra le rapport qu&apos;après confirmation par
+                    l&apos;admin RH.
+                  </p>
+                ) : null}
               </form>
             </Card>
 

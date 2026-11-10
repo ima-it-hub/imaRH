@@ -1,15 +1,20 @@
 import { mutation, query } from "./_generated/server";
 import { v } from "convex/values";
 import {
+  annualLeaveBalanceForYear,
+  annualLeaveEntitlement,
   EMPLOYEE_PAGE_KEYS,
   ASSIGNABLE_PAGE_KEYS,
   generateUniqueBarcode,
+  getSettings,
   hashPassword,
   normalizeUsername,
+  prorateMonthlySalary,
   publicUser,
   requireAdmin,
   requireAdminAnyPage,
   requireAdminPage,
+  todayISO,
 } from "./lib";
 
 export const list = query({
@@ -18,6 +23,7 @@ export const list = query({
     await requireAdminPage(ctx, args.token, "admin-employes");
     const users = await ctx.db.query("users").collect();
     const enriched = [];
+    const leaveYear = Number(todayISO().slice(0, 4));
     for (const u of users) {
       const base = publicUser(u);
       let managerName = "";
@@ -25,7 +31,14 @@ export const list = query({
         const manager = await ctx.db.get(u.managerId);
         managerName = manager?.name ?? "";
       }
-      enriched.push({ ...base, managerName });
+      enriched.push({
+        ...base,
+        annualLeaveBalance:
+          u.role === "employee"
+            ? await annualLeaveBalanceForYear(ctx, u, leaveYear)
+            : base.annualLeaveBalance,
+        managerName,
+      });
     }
     return enriched.sort((a, b) => a.name.localeCompare(b.name));
   },
@@ -42,11 +55,22 @@ export const listEmployees = query({
       "admin-ordres",
       "admin-rapports",
     ]);
-    const users = await ctx.db.query("users").collect();
-    return users
-      .filter((u) => u.role === "employee" && !u.resignedAt)
-      .map(publicUser)
-      .sort((a, b) => a.name.localeCompare(b.name));
+    const users = (await ctx.db.query("users").collect()).filter(
+      (u) => u.role === "employee" && !u.resignedAt
+    );
+    const year = Number(todayISO().slice(0, 4));
+    const result = [];
+    for (const employee of users) {
+      result.push({
+        ...publicUser(employee),
+        annualLeaveBalance: await annualLeaveBalanceForYear(
+          ctx,
+          employee,
+          year
+        ),
+      });
+    }
+    return result.sort((a, b) => a.name.localeCompare(b.name));
   },
 });
 
@@ -160,6 +184,12 @@ export const create = mutation({
     const lastName = args.lastName.trim();
     const name = `${firstName} ${lastName}`.trim();
     const quota = args.annualLeaveQuota ?? 30;
+    if (!Number.isFinite(quota) || quota < 0) {
+      throw new Error("Le quota annuel de congés doit être positif");
+    }
+    const hireDate =
+      args.hireDate && args.hireDate > 0 ? args.hireDate : Date.now();
+    const leaveYear = Number(todayISO().slice(0, 4));
 
     const allowedPageKeys =
       actor.role === "admin" ? ASSIGNABLE_PAGE_KEYS : EMPLOYEE_PAGE_KEYS;
@@ -209,9 +239,13 @@ export const create = mutation({
       workplaceId,
       associatedAgentCode: args.associatedAgentCode?.trim() || undefined,
       managerId: args.role === "employee" ? args.managerId : undefined,
-      hireDate:
-        args.hireDate && args.hireDate > 0 ? args.hireDate : Date.now(),
-      annualLeaveBalance: quota,
+      hireDate,
+      annualLeaveBalance: annualLeaveEntitlement(
+        quota,
+        hireDate,
+        leaveYear
+      ),
+      annualLeaveBalanceYear: leaveYear,
       annualLeaveQuota: quota,
       baseSalary: args.baseSalary ?? 0,
       bonusType: args.role === "employee" ? "FIXED" : undefined,
@@ -268,7 +302,6 @@ export const updateEmployee = mutation({
     baseSalary: v.number(),
     baseBonus: v.number(),
     annualLeaveQuota: v.number(),
-    annualLeaveBalance: v.number(),
     /** Hire date as timestamp (ms) */
     hireDate: v.optional(v.number()),
     /** ZKTeco K50 Pro enrolled user ID (digits); empty clears */
@@ -350,6 +383,28 @@ export const updateEmployee = mutation({
     if (user.role === "employee" && baseBonus <= 0) {
       throw new Error("La prime de base de l'employé doit être supérieure à zéro");
     }
+    if (!Number.isFinite(args.annualLeaveQuota) || args.annualLeaveQuota < 0) {
+      throw new Error("Le quota annuel de congés doit être positif");
+    }
+    const leaveYear = Number(todayISO().slice(0, 4));
+    const leaveRows = await ctx.db
+      .query("leaves")
+      .withIndex("by_employee", (q) => q.eq("employeeId", args.userId))
+      .collect();
+    const previouslyUsedDays = leaveRows.reduce((sum, leave) => {
+      const leaveStart = leave.actualStartDate ?? leave.startDate;
+      return leave.balanceDeducted && leaveStart.slice(0, 4) === String(leaveYear)
+        ? sum + (leave.deductedDays ?? leave.days)
+        : sum;
+    }, 0);
+    const nextLeaveBalance = Math.max(
+      0,
+      annualLeaveEntitlement(
+        args.annualLeaveQuota,
+        args.hireDate ?? user.hireDate,
+        leaveYear
+      ) - previouslyUsedDays
+    );
 
     await ctx.db.patch(args.userId, {
       firstName,
@@ -369,7 +424,8 @@ export const updateEmployee = mutation({
         ? { bonusType: "FIXED" as const, baseBonus, bonusPercent: 0 }
         : {}),
       annualLeaveQuota: args.annualLeaveQuota,
-      annualLeaveBalance: args.annualLeaveBalance,
+      annualLeaveBalance: nextLeaveBalance,
+      annualLeaveBalanceYear: leaveYear,
       ...(args.hireDate !== undefined ? { hireDate: args.hireDate } : {}),
       ...(args.zktecoUserId !== undefined
         ? clearZkteco
@@ -469,6 +525,7 @@ export const resign = mutation({
   args: {
     token: v.string(),
     userId: v.id("users"),
+    stoppingDate: v.string(),
   },
   handler: async (ctx, args) => {
     const admin = await requireAdminPage(ctx, args.token, "admin-employes");
@@ -485,9 +542,134 @@ export const resign = mutation({
       throw new Error("Cet employé a déjà démissionné");
     }
 
+    if (
+      !/^\d{4}-\d{2}-\d{2}$/.test(args.stoppingDate) ||
+      args.stoppingDate > todayISO()
+    ) {
+      throw new Error("Saisissez une date de fin de travail valide");
+    }
+    const stoppingDateMs = new Date(
+      `${args.stoppingDate}T12:00:00+01:00`
+    ).getTime();
+    if (
+      !Number.isFinite(stoppingDateMs) ||
+      todayISO(new Date(stoppingDateMs)) !== args.stoppingDate ||
+      (user.hireDate != null &&
+        todayISO(new Date(user.hireDate)) > args.stoppingDate)
+    ) {
+      throw new Error("Date de fin de travail invalide");
+    }
+
+    const [yearText, monthText] = args.stoppingDate.split("-");
+    const year = Number(yearText);
+    const month = Number(monthText);
+    const settings = await getSettings(ctx);
+    const proratedSalary = prorateMonthlySalary(
+      user.baseSalary ?? 0,
+      user.hireDate,
+      year,
+      month,
+      stoppingDateMs
+    );
+    const existingSalary = await ctx.db
+      .query("salaries")
+      .withIndex("by_employee_period", (q) =>
+        q.eq("employeeId", args.userId).eq("year", year).eq("month", month)
+      )
+      .unique();
+    const leaveDeductions = existingSalary?.leaveDeductions ?? 0;
+    const netPay = Math.max(0, proratedSalary.amount - leaveDeductions);
+    const salaryOrder = existingSalary
+      ? await ctx.db
+        .query("paymentOrders")
+        .withIndex("by_salary", (q) => q.eq("salaryId", existingSalary._id))
+        .unique()
+      : null;
+    if (
+      salaryOrder &&
+      salaryOrder.amount !== netPay &&
+      !["DEMANDE", "REJETE"].includes(salaryOrder.status)
+    ) {
+      throw new Error(
+        "Le salaire de ce mois a déjà été validé ou payé. Régularisez-le avant d'enregistrer la démission."
+      );
+    }
+    const salaryFields = {
+      baseSalary: proratedSalary.amount,
+      contractualSalary: user.baseSalary ?? 0,
+      daysWorked: proratedSalary.daysWorked,
+      daysInMonth: proratedSalary.daysInMonth,
+      leaveDeductions,
+      netPay,
+      updatedAt: Date.now(),
+    };
+    if (existingSalary) {
+      await ctx.db.patch(existingSalary._id, salaryFields);
+    } else {
+      await ctx.db.insert("salaries", {
+        employeeId: args.userId,
+        ...salaryFields,
+        month,
+        year,
+      });
+    }
+    if (
+      salaryOrder &&
+      (salaryOrder.status === "DEMANDE" || salaryOrder.status === "REJETE") &&
+      salaryOrder.amount !== netPay
+    ) {
+      if (netPay <= 0) {
+        await ctx.db.delete(salaryOrder._id);
+      } else {
+        await ctx.db.patch(salaryOrder._id, {
+          amount: netPay,
+          status: "DEMANDE",
+          note: `Salaire final au ${args.stoppingDate}`,
+          requestedAt: Date.now(),
+          treatedAt: undefined,
+        });
+      }
+    }
+
+    const annualBalance = await annualLeaveBalanceForYear(ctx, user, year);
+    const accruedDays = annualLeaveEntitlement(
+      user.annualLeaveQuota ?? 30,
+      user.hireDate,
+      year,
+      args.stoppingDate
+    );
+    const settlementDays = annualBalance - accruedDays;
+    const dailyRate =
+      (user.baseSalary ?? 0) / Math.max(1, settings.workingDaysPerMonth);
+    const settlementAmount = Math.round(settlementDays * dailyRate);
+    const existingSettlement = await ctx.db
+      .query("annualLeaveSettlements")
+      .withIndex("by_employee_year_kind", (q) =>
+        q
+          .eq("employeeId", args.userId)
+          .eq("year", year)
+          .eq("kind", "RESIGNATION")
+      )
+      .unique();
+    if (existingSettlement) {
+      throw new Error("Le solde de congés de cette année a déjà été régularisé");
+    }
+    if (settlementDays !== 0) {
+      await ctx.db.insert("annualLeaveSettlements", {
+        employeeId: args.userId,
+        year,
+        kind: "RESIGNATION",
+        days: settlementDays,
+        amount: settlementAmount,
+        createdAt: Date.now(),
+      });
+    }
+
     await ctx.db.patch(args.userId, {
       isActive: false,
-      resignedAt: Date.now(),
+      resignedAt: stoppingDateMs,
+      annualLeaveBalance: annualBalance,
+      annualLeaveBalanceYear: year,
     });
 
     const sessions = await ctx.db
@@ -507,6 +689,12 @@ export const resign = mutation({
       await ctx.db.patch(report._id, { managerId: undefined });
     }
 
-    return publicUser((await ctx.db.get(args.userId))!);
+    return {
+      employee: publicUser((await ctx.db.get(args.userId))!),
+      finalSalary: netPay,
+      workingDays: proratedSalary.daysWorked,
+      annualLeaveAdjustmentDays: settlementDays,
+      annualLeaveAdjustmentAmount: settlementAmount,
+    };
   },
 });

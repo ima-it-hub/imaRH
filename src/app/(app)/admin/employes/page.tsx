@@ -12,6 +12,7 @@ import {
   Badge,
   Card,
   Field,
+  Modal,
   PrimaryButton,
   SecondaryButton,
   inputClass,
@@ -76,6 +77,11 @@ export default function AdminEmployesPage() {
   const [success, setSuccess] = useState("");
   const [busy, setBusy] = useState(false);
   const [expandedId, setExpandedId] = useState<Id<"users"> | null>(null);
+  const [resigningEmployee, setResigningEmployee] = useState<{
+    _id: Id<"users">;
+    name: string;
+  } | null>(null);
+  const [stoppingDate, setStoppingDate] = useState(todayISOLocal());
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -181,12 +187,64 @@ export default function AdminEmployesPage() {
     await updatePages({ token, userId, allowedPages: next });
   }
 
+  async function onResign(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    if (!token || !resigningEmployee) return;
+    setBusy(true);
+    setError("");
+    setSuccess("");
+    try {
+      const result = await resign({
+        token,
+        userId: resigningEmployee._id,
+        stoppingDate,
+      });
+      const adjustmentPrefix =
+        result.annualLeaveAdjustmentAmount >= 0 ? "+" : "−";
+      setSuccess(
+        `Démission de ${resigningEmployee.name} enregistrée. Salaire final : ${moneyDZD(result.finalSalary)} (${result.workingDays} j). Régularisation congés : ${adjustmentPrefix}${moneyDZD(Math.abs(result.annualLeaveAdjustmentAmount))} (${result.annualLeaveAdjustmentDays} j).`
+      );
+      setResigningEmployee(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Erreur");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <RequireAuth page="admin-employes">
       <PageShell
         title="Gestion des collaborateurs"
         description="Création, accès aux pages, salaires et activation des comptes."
       >
+        <Modal
+          open={resigningEmployee !== null}
+          onClose={() => {
+            if (!busy) setResigningEmployee(null);
+          }}
+          title={`Enregistrer la démission${resigningEmployee ? ` — ${resigningEmployee.name}` : ""}`}
+        >
+          <form onSubmit={onResign} className="space-y-4">
+            <p className="text-sm text-zinc-600">
+              Le salaire du mois et le solde de congés seront régularisés selon
+              cette date.
+            </p>
+            <Field label="Dernier jour travaillé">
+              <input
+                type="date"
+                required
+                max={todayISOLocal()}
+                className={inputClass}
+                value={stoppingDate}
+                onChange={(e) => setStoppingDate(e.target.value)}
+              />
+            </Field>
+            <PrimaryButton type="submit" disabled={busy} className="w-full">
+              {busy ? "Enregistrement…" : "Confirmer la démission"}
+            </PrimaryButton>
+          </form>
+        </Modal>
         <div className="mb-4 flex flex-wrap items-center gap-3">
           <input
             className={inputClass + " max-w-md"}
@@ -355,9 +413,10 @@ export default function AdminEmployesPage() {
                     onChange={(e) => setBaseSalary(e.target.value)}
                   />
                 </Field>
-                <Field label="Quota congés">
+                <Field label="Quota annuel de congés (jours)">
                   <input
                     type="number"
+                    min={0}
                     className={inputClass}
                     value={annualLeaveQuota}
                     onChange={(e) => setAnnualLeaveQuota(e.target.value)}
@@ -534,23 +593,9 @@ export default function AdminEmployesPage() {
                         <SecondaryButton
                           type="button"
                           className="border-red-200 text-red-700 hover:bg-red-50"
-                          onClick={async () => {
-                            if (!token) return;
-                            if (
-                              !confirm(
-                                `Enregistrer la démission de ${u.name} ? Le compte sera désactivé.`
-                              )
-                            ) {
-                              return;
-                            }
-                            try {
-                              await resign({ token, userId: u._id });
-                              setSuccess(`Démission enregistrée : ${u.name}`);
-                            } catch (err) {
-                              setError(
-                                err instanceof Error ? err.message : "Erreur"
-                              );
-                            }
+                          onClick={() => {
+                            setStoppingDate(todayISOLocal());
+                            setResigningEmployee({ _id: u._id, name: u.name });
                           }}
                         >
                           Démission
@@ -727,7 +772,6 @@ function EmployeeQuickEdit({
     baseSalary: number;
     baseBonus: number;
     annualLeaveQuota: number;
-    annualLeaveBalance: number;
     hireDate?: number | null;
     zktecoUserId?: string;
     associatedAgentCode?: string;
@@ -755,7 +799,6 @@ function EmployeeQuickEdit({
     baseSalary: number;
     baseBonus: number;
     annualLeaveQuota: number;
-    annualLeaveBalance: number;
     hireDate?: number;
     zktecoUserId?: string;
     associatedAgentCode?: string;
@@ -772,7 +815,6 @@ function EmployeeQuickEdit({
     baseSalary: user.baseSalary,
     baseBonus: user.baseBonus,
     annualLeaveQuota: user.annualLeaveQuota,
-    annualLeaveBalance: user.annualLeaveBalance,
     hireDate: hireDateInputValue(user.hireDate),
     zktecoUserId: user.zktecoUserId ?? "",
     associatedAgentCode: user.associatedAgentCode ?? "",
@@ -922,28 +964,16 @@ function EmployeeQuickEdit({
               placeholder="ex. 1"
             />
           </Field>
-          <Field label="Quota congés">
+          <Field label="Quota annuel de congés (jours)">
             <input
               type="number"
+              min={0}
               className={inputClass}
               value={form.annualLeaveQuota}
               onChange={(e) =>
                 setForm((prev) => ({
                   ...prev,
                   annualLeaveQuota: Number(e.target.value),
-                }))
-              }
-            />
-          </Field>
-          <Field label="Solde congés">
-            <input
-              type="number"
-              className={inputClass}
-              value={form.annualLeaveBalance}
-              onChange={(e) =>
-                setForm((prev) => ({
-                  ...prev,
-                  annualLeaveBalance: Number(e.target.value),
                 }))
               }
             />
@@ -975,7 +1005,6 @@ function EmployeeQuickEdit({
                   baseSalary: form.baseSalary,
                   baseBonus: form.baseBonus,
                   annualLeaveQuota: form.annualLeaveQuota,
-                  annualLeaveBalance: form.annualLeaveBalance,
                   hireDate: hireTs,
                   zktecoUserId: form.zktecoUserId,
                   associatedAgentCode: form.associatedAgentCode,

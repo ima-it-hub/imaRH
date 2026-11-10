@@ -33,6 +33,10 @@ export default function FinancesPage() {
     api.finances.myLateDeductions,
     token ? { token } : "skip"
   );
+  const annualLeaveSettlements = useQuery(
+    api.finances.myAnnualLeaveSettlements,
+    token ? { token } : "skip"
+  );
   const orders = useQuery(
     api.finances.myPaymentOrders,
     token ? { token } : "skip"
@@ -43,7 +47,7 @@ export default function FinancesPage() {
   );
 
   const [tab, setTab] = useState<
-    "salaires" | "primes" | "retards" | "paiements"
+    "salaires" | "primes" | "retards" | "conges" | "paiements"
   >("paiements");
   const [type, setType] = useState<"SALAIRE_MENSUEL" | "ACOMPTE" | "PRIME">(
     "ACOMPTE"
@@ -141,7 +145,7 @@ export default function FinancesPage() {
           </SecondaryButton>
         </div>
 
-        <div className="mb-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
+        <div className="mb-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-6">
           <StatCard
             label="Solde disponible"
             value={moneyDZD(available)}
@@ -164,6 +168,10 @@ export default function FinancesPage() {
             }
           />
           <StatCard
+            label="Régularisation congés"
+            value={moneyDZD(balance?.totalAnnualLeaveAdjustments ?? 0)}
+          />
+          <StatCard
             label="Déjà demandé / payé"
             value={moneyDZD(balance?.reservedOrPaid ?? 0)}
           />
@@ -176,6 +184,7 @@ export default function FinancesPage() {
               ["salaires", "Salaires"],
               ["primes", "Primes"],
               ["retards", "Retards"],
+              ["conges", "Congés"],
             ] as const
           ).map(([key, label]) => (
             <button
@@ -254,6 +263,44 @@ export default function FinancesPage() {
               {!lateDeductions?.length ? (
                 <p className="text-sm text-zinc-500">
                   Aucune retenue pour retard.
+                </p>
+              ) : null}
+            </div>
+          </Card>
+        ) : null}
+
+        {tab === "conges" ? (
+          <Card>
+            <div className="space-y-3">
+              {(annualLeaveSettlements ?? []).map((settlement) => (
+                <div
+                  key={settlement._id}
+                  className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-zinc-100 px-4 py-3"
+                >
+                  <div>
+                    <p className="font-medium text-zinc-900">
+                      {settlement.kind === "YEAR_END"
+                        ? `Conversion des congés restants — ${settlement.year}`
+                        : `Solde de congés à la démission — ${settlement.year}`}
+                    </p>
+                    <p className="text-sm text-zinc-500">
+                      {settlement.days > 0 ? "+" : ""}
+                      {settlement.days} jour(s)
+                    </p>
+                  </div>
+                  <p
+                    className={`text-lg font-semibold ${
+                      settlement.amount < 0 ? "text-red-600" : "text-[#0088E8]"
+                    }`}
+                  >
+                    {settlement.amount < 0 ? "−" : "+"}
+                    {moneyDZD(Math.abs(settlement.amount))}
+                  </p>
+                </div>
+              ))}
+              {!annualLeaveSettlements?.length ? (
+                <p className="text-sm text-zinc-500">
+                  Aucune régularisation de congés.
                 </p>
               ) : null}
             </div>

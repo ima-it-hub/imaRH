@@ -4,6 +4,7 @@ import { Id } from "./_generated/dataModel";
 import { recalculateLeaveAttendance } from "./attendance";
 import {
   addDaysISO,
+  annualLeaveBalanceForYear,
   daysBetween,
   getSettings,
   monthBounds,
@@ -13,6 +14,64 @@ import {
   requireUser,
   todayISO,
 } from "./lib";
+
+type LeaveType =
+  | "annuel"
+  | "maladie"
+  | "sans_solde"
+  | "evenements_familiaux"
+  | "mariage"
+  | "deces"
+  | "examen_formation"
+  | "recuperation"
+  | "autre";
+
+const leaveTypeValidator = v.union(
+  v.literal("annuel"),
+  v.literal("maladie"),
+  v.literal("sans_solde"),
+  v.literal("evenements_familiaux"),
+  v.literal("mariage"),
+  v.literal("deces"),
+  v.literal("examen_formation"),
+  v.literal("recuperation"),
+  v.literal("autre")
+);
+
+function usesAnnualLeaveBalance(type: LeaveType) {
+  return [
+    "annuel",
+    "evenements_familiaux",
+    "mariage",
+    "deces",
+    "examen_formation",
+    "recuperation",
+    "autre",
+  ].includes(type);
+}
+
+function leaveTypeLabel(type: LeaveType) {
+  switch (type) {
+    case "evenements_familiaux":
+      return "Congé pour événements familiaux";
+    case "mariage":
+      return "Congé pour mariage";
+    case "deces":
+      return "Congé de décès / deuil";
+    case "examen_formation":
+      return "Congé d'examen / formation";
+    case "recuperation":
+      return "Récupération (RTT / Repos)";
+    case "autre":
+      return "Autre";
+    case "annuel":
+      return "Congé payé / annuel";
+    case "maladie":
+      return "Maladie";
+    case "sans_solde":
+      return "Sans solde";
+  }
+}
 
 /** Extra days beyond demand: acceptable = actual total; else requested + 2×extra. */
 export function computeDeductedDays(
@@ -32,19 +91,19 @@ export function computeDeductedDays(
 
 /**
  * Split charged days between annual balance and salary.
- * - annuel → all from balance
+ * - annual-balance leave types → all from balance
  * - maladie paid → nothing
  * - maladie unpaid → balance first, remainder from salary
  * - sans_solde → all from salary
  */
 export function splitLeaveCharges(args: {
-  type: "annuel" | "maladie" | "sans_solde";
+  type: LeaveType;
   isPaid?: boolean;
   days: number;
   annualBalance: number;
 }) {
   const days = Math.max(0, args.days);
-  if (args.type === "annuel") {
+  if (usesAnnualLeaveBalance(args.type)) {
     return { fromBalance: days, fromSalary: 0 };
   }
   if (args.type === "maladie" && args.isPaid === true) {
@@ -54,7 +113,7 @@ export function splitLeaveCharges(args: {
     const fromBalance = Math.min(days, Math.max(0, args.annualBalance));
     return { fromBalance, fromSalary: days - fromBalance };
   }
-  // sans_solde (and maladie without isPaid treated as unpaid at close if set)
+  // Legacy unpaid leave behavior is retained for existing requests.
   if (args.type === "sans_solde") {
     return { fromBalance: 0, fromSalary: days };
   }
@@ -163,24 +222,35 @@ export const myLeaves = query({
   },
 });
 
+export const myBalance = query({
+  args: { token: v.string() },
+  handler: async (ctx, args) => {
+    const user = await requireUser(ctx, args.token);
+    return await annualLeaveBalanceForYear(
+      ctx,
+      user,
+      Number(todayISO().slice(0, 4))
+    );
+  },
+});
+
 export const request = mutation({
   args: {
     token: v.string(),
-    type: v.union(
-      v.literal("annuel"),
-      v.literal("maladie"),
-      v.literal("sans_solde")
-    ),
+    type: leaveTypeValidator,
     startDate: v.string(),
     endDate: v.string(),
-    reason: v.string(),
+    reason: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const user = await requireUser(ctx, args.token);
     if (user.role !== "employee") {
       throw new Error("Seuls les employés peuvent demander un congé");
     }
-    if (!args.reason.trim()) throw new Error("Le motif est obligatoire");
+    const reason = args.reason?.trim() ?? "";
+    if (args.type === "autre" && !reason) {
+      throw new Error("Le motif est obligatoire pour le type Autre");
+    }
     if (args.endDate <= args.startDate) {
       throw new Error(
         "La date de retour doit être après la date de début (elle n'est pas décomptée)"
@@ -200,8 +270,12 @@ export const request = mutation({
         );
       }
     }
-    const balance = user.annualLeaveBalance ?? 0;
-    if (args.type === "annuel" && days > balance) {
+    const balance = await annualLeaveBalanceForYear(
+      ctx,
+      user,
+      Number(todayISO().slice(0, 4))
+    );
+    if (usesAnnualLeaveBalance(args.type) && days > balance) {
       throw new Error(`Solde insuffisant (${balance} jour(s) restant(s))`);
     }
 
@@ -211,7 +285,7 @@ export const request = mutation({
       startDate: args.startDate,
       endDate: args.endDate,
       days,
-      reason: args.reason.trim(),
+      reason,
       status: "EN_ATTENTE",
       isPaid: args.type === "sans_solde" ? false : undefined,
       balanceDeducted: false,
@@ -226,11 +300,91 @@ export const request = mutation({
         ctx,
         admin._id,
         "Nouvelle demande de congé",
-        `${user.name} a demandé ${days} jour(s) de congé (${args.type}).`
+        `${user.name} a demandé ${days} jour(s) de congé (${leaveTypeLabel(args.type)}).${reason ? ` Motif : ${reason}` : ""}`
       );
     }
 
     return await ctx.db.get(id);
+  },
+});
+
+export const updateMyPendingRequest = mutation({
+  args: {
+    token: v.string(),
+    leaveId: v.id("leaves"),
+    type: leaveTypeValidator,
+    startDate: v.string(),
+    endDate: v.string(),
+    reason: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const user = await requireUser(ctx, args.token);
+    if (user.role !== "employee") {
+      throw new Error("Seuls les employés peuvent modifier une demande de congé");
+    }
+    const leave = await ctx.db.get(args.leaveId);
+    if (
+      !leave ||
+      leave.employeeId !== user._id ||
+      leave.status !== "EN_ATTENTE" ||
+      leave.companyLeaveName
+    ) {
+      throw new Error("Cette demande ne peut plus être modifiée");
+    }
+    const reason = args.reason?.trim() ?? "";
+    if (args.type === "autre" && !reason) {
+      throw new Error("Le motif est obligatoire pour le type Autre");
+    }
+    if (
+      !isValidISODate(args.startDate) ||
+      !isValidISODate(args.endDate) ||
+      args.endDate <= args.startDate
+    ) {
+      throw new Error("La période de congé est invalide");
+    }
+
+    const days = daysBetween(args.startDate, args.endDate);
+    if (days < 1) {
+      throw new Error("La période de congé doit compter au moins 1 jour");
+    }
+    if (args.type === "annuel") {
+      const minStart = addDaysISO(todayISO(), 16);
+      if (args.startDate < minStart && args.startDate !== leave.startDate) {
+        throw new Error(
+          `Pour un congé annuel, la date de départ doit être au plus tôt le ${minStart} (délai de 15 jours)`
+        );
+      }
+    }
+    const balance = await annualLeaveBalanceForYear(
+      ctx,
+      user,
+      Number(todayISO().slice(0, 4))
+    );
+    if (usesAnnualLeaveBalance(args.type) && days > balance) {
+      throw new Error(`Solde insuffisant (${balance} jour(s) restant(s))`);
+    }
+
+    await ctx.db.patch(leave._id, {
+      type: args.type,
+      startDate: args.startDate,
+      endDate: args.endDate,
+      days,
+      reason,
+      isPaid: args.type === "sans_solde" ? false : undefined,
+    });
+
+    const admins = (await ctx.db.query("users").collect()).filter(
+      (admin) => admin.role === "admin" && admin.isActive
+    );
+    for (const admin of admins) {
+      await notify(
+        ctx,
+        admin._id,
+        "Demande de congé modifiée",
+        `${user.name} a modifié sa demande de congé du ${args.startDate} au ${args.endDate}.`
+      );
+    }
+    return await ctx.db.get(leave._id);
   },
 });
 
@@ -244,10 +398,21 @@ export const pending = query({
       .collect();
 
     const result = [];
+    const leaveYear = Number(todayISO().slice(0, 4));
     for (const row of rows) {
       const employee = await ctx.db.get(row.employeeId);
       if (!employee) continue;
-      result.push({ ...row, employee: publicUser(employee) });
+      result.push({
+        ...row,
+        employee: {
+          ...publicUser(employee),
+          annualLeaveBalance: await annualLeaveBalanceForYear(
+            ctx,
+            employee,
+            leaveYear
+          ),
+        },
+      });
     }
     return result.sort((a, b) => b.createdAt - a.createdAt);
   },
@@ -264,11 +429,22 @@ export const toClose = query({
       .collect();
 
     const result = [];
+    const leaveYear = Number(todayISO().slice(0, 4));
     for (const row of rows) {
       if (row.actualStartDate && row.actualEndDate) continue;
       const employee = await ctx.db.get(row.employeeId);
       if (!employee) continue;
-      result.push({ ...row, employee: publicUser(employee) });
+      result.push({
+        ...row,
+        employee: {
+          ...publicUser(employee),
+          annualLeaveBalance: await annualLeaveBalanceForYear(
+            ctx,
+            employee,
+            leaveYear
+          ),
+        },
+      });
     }
     return result.sort((a, b) => (b.treatedAt ?? 0) - (a.treatedAt ?? 0));
   },
@@ -280,10 +456,21 @@ export const all = query({
     await requireAdminPage(ctx, args.token, "admin-conges");
     const rows = await ctx.db.query("leaves").collect();
     const result = [];
+    const leaveYear = Number(todayISO().slice(0, 4));
     for (const row of rows) {
       const employee = await ctx.db.get(row.employeeId);
       if (!employee) continue;
-      result.push({ ...row, employee: publicUser(employee) });
+      result.push({
+        ...row,
+        employee: {
+          ...publicUser(employee),
+          annualLeaveBalance: await annualLeaveBalanceForYear(
+            ctx,
+            employee,
+            leaveYear
+          ),
+        },
+      });
     }
     return result.sort((a, b) => b.createdAt - a.createdAt);
   },
@@ -302,14 +489,10 @@ export const requestForEmployee = mutation({
   args: {
     token: v.string(),
     employeeId: v.id("users"),
-    type: v.union(
-      v.literal("annuel"),
-      v.literal("maladie"),
-      v.literal("sans_solde")
-    ),
+    type: leaveTypeValidator,
     startDate: v.string(),
     endDate: v.string(),
-    reason: v.string(),
+    reason: v.optional(v.string()),
     /** Required when type is maladie */
     isPaid: v.optional(v.boolean()),
     /** If true, skip queue and mark approved (still needs date closure). */
@@ -321,7 +504,10 @@ export const requestForEmployee = mutation({
     if (!employee || employee.role !== "employee" || employee.resignedAt) {
       throw new Error("Employé introuvable");
     }
-    if (!args.reason.trim()) throw new Error("Le motif est obligatoire");
+    const reason = args.reason?.trim() ?? "";
+    if (args.type === "autre" && !reason) {
+      throw new Error("Le motif est obligatoire pour le type Autre");
+    }
     if (args.endDate <= args.startDate) {
       throw new Error(
         "La date de retour doit être après la date de début (elle n'est pas décomptée)"
@@ -332,8 +518,12 @@ export const requestForEmployee = mutation({
     if (days < 1) {
       throw new Error("La période de congé doit compter au moins 1 jour");
     }
-    const balance = employee.annualLeaveBalance ?? 0;
-    if (args.type === "annuel" && days > balance) {
+    const balance = await annualLeaveBalanceForYear(
+      ctx,
+      employee,
+      Number(todayISO().slice(0, 4))
+    );
+    if (usesAnnualLeaveBalance(args.type) && days > balance) {
       throw new Error(`Solde insuffisant (${balance} jour(s) restant(s))`);
     }
 
@@ -358,7 +548,7 @@ export const requestForEmployee = mutation({
       startDate: args.startDate,
       endDate: args.endDate,
       days,
-      reason: args.reason.trim(),
+      reason,
       status: autoApprove ? "APPROUVE" : "EN_ATTENTE",
       adminResponse: autoApprove ? "Créé et approuvé par l'admin" : undefined,
       isPaid,
@@ -379,8 +569,8 @@ export const requestForEmployee = mutation({
       args.employeeId,
       autoApprove ? "Congé enregistré" : "Demande de congé créée",
       autoApprove
-        ? `Un congé ${args.type}${paidNote} du ${args.startDate} au ${args.endDate} (${days} j) a été créé par l'admin.`
-        : `Une demande de congé ${args.type} du ${args.startDate} au ${args.endDate} a été créée pour vous.`
+        ? `Un congé ${leaveTypeLabel(args.type)}${paidNote} du ${args.startDate} au ${args.endDate} (${days} j) a été créé par l'admin.${reason ? ` Motif : ${reason}` : ""}`
+        : `Une demande de congé ${leaveTypeLabel(args.type)} du ${args.startDate} au ${args.endDate} a été créée pour vous.${reason ? ` Motif : ${reason}` : ""}`
     );
 
     return await ctx.db.get(id);
@@ -494,9 +684,12 @@ export const createCompanyLeave = mutation({
     }
 
     const now = Date.now();
+    const leaveYear = Number(todayISO().slice(0, 4));
     for (const employee of employees) {
+      const balance = await annualLeaveBalanceForYear(ctx, employee, leaveYear);
       await ctx.db.patch(employee._id, {
-        annualLeaveBalance: (employee.annualLeaveBalance ?? 0) - chargedDays,
+        annualLeaveBalance: balance - chargedDays,
+        annualLeaveBalanceYear: leaveYear,
       });
       await ctx.db.insert("leaves", {
         employeeId: employee._id,
@@ -632,9 +825,16 @@ export const updateCompanyLeave = mutation({
             user.role === "employee" && user.isActive && !user.resignedAt
         );
         const now = Date.now();
+        const leaveYear = Number(todayISO().slice(0, 4));
         for (const employee of employees) {
+          const balance = await annualLeaveBalanceForYear(
+            ctx,
+            employee,
+            leaveYear
+          );
           await ctx.db.patch(employee._id, {
-            annualLeaveBalance: (employee.annualLeaveBalance ?? 0) - days,
+            annualLeaveBalance: balance - days,
+            annualLeaveBalanceYear: leaveYear,
           });
           await ctx.db.insert("leaves", {
             employeeId: employee._id,
@@ -689,9 +889,15 @@ export const updateCompanyLeave = mutation({
         const employee = await ctx.db.get(leave.employeeId);
         if (!employee) continue;
         const previousDeduction = leave.deductedDays ?? leave.days;
+        const leaveYear = Number(todayISO().slice(0, 4));
+        const balance = await annualLeaveBalanceForYear(
+          ctx,
+          employee,
+          leaveYear
+        );
         await ctx.db.patch(employee._id, {
-          annualLeaveBalance:
-            (employee.annualLeaveBalance ?? 0) + previousDeduction,
+          annualLeaveBalance: balance + previousDeduction,
+          annualLeaveBalanceYear: leaveYear,
         });
         await ctx.db.delete(leave._id);
         await recalculateLeaveAttendance(ctx, employee._id, [
@@ -706,9 +912,15 @@ export const updateCompanyLeave = mutation({
       const employee = await ctx.db.get(leave.employeeId);
       if (!employee) continue;
       const previousDeduction = leave.deductedDays ?? leave.days;
+      const leaveYear = Number(todayISO().slice(0, 4));
+      const balance = await annualLeaveBalanceForYear(
+        ctx,
+        employee,
+        leaveYear
+      );
       await ctx.db.patch(employee._id, {
-        annualLeaveBalance:
-          (employee.annualLeaveBalance ?? 0) + previousDeduction - chargedDays,
+        annualLeaveBalance: balance + previousDeduction - chargedDays,
+        annualLeaveBalanceYear: leaveYear,
       });
       await ctx.db.patch(leave._id, {
         companyLeaveName: name,
@@ -763,10 +975,14 @@ export const decide = mutation({
       }
     }
 
-    if (args.status === "APPROUVE" && leave.type === "annuel") {
+    if (args.status === "APPROUVE" && usesAnnualLeaveBalance(leave.type)) {
       const employee = await ctx.db.get(leave.employeeId);
       if (!employee) throw new Error("Employé introuvable");
-      const balance = employee.annualLeaveBalance ?? 0;
+      const balance = await annualLeaveBalanceForYear(
+        ctx,
+        employee,
+        Number(todayISO().slice(0, 4))
+      );
       if (leave.days > balance) {
         throw new Error("Solde de congés insuffisant pour approuver");
       }
@@ -875,8 +1091,10 @@ export const recordActualDates = mutation({
       previouslyChargedBalance = leave.days;
     }
 
+    const leaveYear = Number(args.actualStartDate.slice(0, 4));
     const balanceBefore =
-      (employee.annualLeaveBalance ?? 0) + previouslyChargedBalance;
+      (await annualLeaveBalanceForYear(ctx, employee, leaveYear)) +
+      previouslyChargedBalance;
 
     const { fromBalance, fromSalary } = splitLeaveCharges({
       type: leave.type,
@@ -896,9 +1114,12 @@ export const recordActualDates = mutation({
     const dailyRate = (employee.baseSalary ?? 0) / workingDays;
     const salaryDeductionAmount = Math.round(dailyRate * fromSalary);
 
-    await ctx.db.patch(leave.employeeId, {
-      annualLeaveBalance: balanceBefore - fromBalance,
-    });
+    if (leaveYear === Number(todayISO().slice(0, 4))) {
+      await ctx.db.patch(leave.employeeId, {
+        annualLeaveBalance: balanceBefore - fromBalance,
+        annualLeaveBalanceYear: leaveYear,
+      });
+    }
 
     // If re-closing, clear previous salary amount before re-sync
     await ctx.db.patch(args.leaveId, {

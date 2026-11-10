@@ -8,8 +8,10 @@
  * @module
  */
 
+import type * as annualLeave from "../annualLeave.js";
 import type * as attendance from "../attendance.js";
 import type * as auth from "../auth.js";
+import type * as crons from "../crons.js";
 import type * as dashboard from "../dashboard.js";
 import type * as departments from "../departments.js";
 import type * as finances from "../finances.js";
@@ -31,8 +33,10 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
+  annualLeave: typeof annualLeave;
   attendance: typeof attendance;
   auth: typeof auth;
+  crons: typeof crons;
   dashboard: typeof dashboard;
   departments: typeof departments;
   finances: typeof finances;

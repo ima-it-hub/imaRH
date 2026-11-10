@@ -15,6 +15,12 @@ import {
   todayISOLocal,
 } from "@/lib/format";
 
+type MonthlyMetricDraft = {
+  morningLateMinutes: string;
+  breakLateMinutes: string;
+  missingScans: string;
+};
+
 export default function AdminPointagesPage() {
   const { token } = useAuth();
   const [date, setDate] = useState(todayISOLocal());
@@ -27,6 +33,16 @@ export default function AdminPointagesPage() {
   );
   const [deductionDrafts, setDeductionDrafts] = useState<
     Record<string, string>
+  >({});
+  const [monthlyMetricDrafts, setMonthlyMetricDrafts] = useState<
+    Record<
+      string,
+      {
+        morningLateMinutes: string;
+        breakLateMinutes: string;
+        missingScans: string;
+      }
+    >
   >({});
   const [savingDeductionId, setSavingDeductionId] = useState<string | null>(
     null
@@ -47,6 +63,18 @@ export default function AdminPointagesPage() {
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [msg, setMsg] = useState("");
 
+  function updateMonthlyMetrics(
+    draftKey: string,
+    metrics: MonthlyMetricDraft
+  ) {
+    setMonthlyMetricDrafts((drafts) => ({ ...drafts, [draftKey]: metrics }));
+    setDeductionDrafts((drafts) => {
+      const next = { ...drafts };
+      delete next[draftKey];
+      return next;
+    });
+  }
+
   async function save(attendanceId: Id<"attendances">, currentLate: number) {
     if (!token) return;
     const value = Number(drafts[attendanceId] ?? String(currentLate));
@@ -56,13 +84,37 @@ export default function AdminPointagesPage() {
 
   async function saveMonthlyDeduction(
     employeeId: Id<"users">,
-    currentAmount: number
+    currentAmount: number,
+    currentMorningLateMinutes: number,
+    currentBreakLateMinutes: number,
+    currentMissingScans: number
   ) {
     if (!token || !periodYear || !periodMonth) return;
-    const amount = Number(
-      deductionDrafts[`${monthPeriod}:${employeeId}`] ??
-        String(currentAmount)
+    const draftKey = `${monthPeriod}:${employeeId}`;
+    const amount = Number(deductionDrafts[draftKey] ?? String(currentAmount));
+    const metrics = monthlyMetricDrafts[draftKey];
+    const morningLateMinutes = Number(
+      metrics?.morningLateMinutes ?? currentMorningLateMinutes
     );
+    const breakLateMinutes = Number(
+      metrics?.breakLateMinutes ?? currentBreakLateMinutes
+    );
+    const missingScans = Number(
+      metrics?.missingScans ?? currentMissingScans
+    );
+    if (
+      !Number.isInteger(morningLateMinutes) ||
+      morningLateMinutes < 0 ||
+      !Number.isInteger(breakLateMinutes) ||
+      breakLateMinutes < 0 ||
+      !Number.isInteger(missingScans) ||
+      missingScans < 0 ||
+      !Number.isFinite(amount) ||
+      amount < 0
+    ) {
+      setDeductionError("Saisissez des totaux et un montant valides.");
+      return;
+    }
     setSavingDeductionId(employeeId);
     setDeductionMsg("");
     setDeductionError("");
@@ -73,6 +125,9 @@ export default function AdminPointagesPage() {
         year: periodYear,
         month: periodMonth,
         amount,
+        morningLateMinutes,
+        breakLateMinutes,
+        missingScans,
       });
       setDeductionDrafts((drafts) => ({
         ...drafts,
@@ -99,7 +154,7 @@ export default function AdminPointagesPage() {
     <RequireAuth page="admin-pointages">
       <PageShell
         title="Pointages & Retards"
-        description="Temps travaillé vs durée obligatoire. Vous pouvez corriger les minutes de retard (la retenue sur le solde se recalcule)."
+        description="Les scans hors horaires sont ignorés. Les retards sont calculés séparément pour l'entrée et le retour de pause."
       >
         <div className="mb-4 flex flex-wrap items-center gap-3">
           <input
@@ -118,8 +173,8 @@ export default function AdminPointagesPage() {
                 Retenues mensuelles à valider
               </h2>
               <p className="mt-1 text-sm text-zinc-500">
-                Le retard ne réduit le solde qu&apos;après validation. Vous
-                pouvez modifier le montant avant de le valider.
+                Vérifiez ou modifiez les retards du matin, les retards après
+                pause et les scans manquants avant de valider la retenue.
               </p>
             </div>
             <label className="text-sm">
@@ -156,7 +211,9 @@ export default function AdminPointagesPage() {
               <thead className="text-xs uppercase text-zinc-500">
                 <tr>
                   <th className="pb-3 pr-3 text-left">Employé</th>
-                  <th className="pb-3 pr-3 text-right">Retard</th>
+                  <th className="pb-3 pr-3 text-right">Matin (min)</th>
+                  <th className="pb-3 pr-3 text-right">Après pause (min)</th>
+                  <th className="pb-3 pr-3 text-right">Scans manquants</th>
                   <th className="pb-3 pr-3 text-right">Calculé</th>
                   <th className="pb-3 pr-3 text-left">Montant à valider</th>
                   <th className="pb-3 pr-3 text-left">État</th>
@@ -166,8 +223,18 @@ export default function AdminPointagesPage() {
               <tbody>
                 {(monthlyDeductions ?? []).map((row) => {
                   const draftKey = `${monthPeriod}:${row.employeeId}`;
+                  const metrics = monthlyMetricDrafts[draftKey];
+                  const editedAmount = metrics
+                    ? Math.round(
+                        (Number(metrics.morningLateMinutes) +
+                          Number(metrics.breakLateMinutes)) *
+                          row.lateMinuteRate +
+                          Math.floor(Number(metrics.missingScans) / 4) *
+                            row.halfDayAmount
+                      )
+                    : row.amount;
                   const amount = Number(
-                    deductionDrafts[draftKey] ?? String(row.amount)
+                    deductionDrafts[draftKey] ?? String(editedAmount)
                   );
                   return (
                     <tr
@@ -178,10 +245,78 @@ export default function AdminPointagesPage() {
                         {row.employeeName}
                       </td>
                       <td className="py-3 pr-3 text-right">
-                        {row.lateMinutes} min
+                        <input
+                          aria-label={`Retard du matin de ${row.employeeName} en minutes`}
+                          type="number"
+                          min={0}
+                          step={1}
+                          className="w-20 rounded-lg border border-zinc-200 px-2 py-1.5"
+                          value={
+                            metrics?.morningLateMinutes ??
+                            String(row.morningLateMinutes)
+                          }
+                          onChange={(e) =>
+                            updateMonthlyMetrics(draftKey, {
+                                morningLateMinutes: e.target.value,
+                                breakLateMinutes:
+                                  metrics?.breakLateMinutes ??
+                                  String(row.breakLateMinutes),
+                                missingScans:
+                                  metrics?.missingScans ??
+                                  String(row.missingScans),
+                            })
+                          }
+                        />
                       </td>
                       <td className="py-3 pr-3 text-right">
-                        {moneyDZD(row.calculatedAmount)}
+                        <input
+                          aria-label={`Retard après pause de ${row.employeeName} en minutes`}
+                          type="number"
+                          min={0}
+                          step={1}
+                          className="w-20 rounded-lg border border-zinc-200 px-2 py-1.5"
+                          value={
+                            metrics?.breakLateMinutes ??
+                            String(row.breakLateMinutes)
+                          }
+                          onChange={(e) =>
+                            updateMonthlyMetrics(draftKey, {
+                                morningLateMinutes:
+                                  metrics?.morningLateMinutes ??
+                                  String(row.morningLateMinutes),
+                                breakLateMinutes: e.target.value,
+                                missingScans:
+                                  metrics?.missingScans ??
+                                  String(row.missingScans),
+                            })
+                          }
+                        />
+                      </td>
+                      <td className="py-3 pr-3 text-right">
+                        <input
+                          aria-label={`Scans manquants de ${row.employeeName}`}
+                          type="number"
+                          min={0}
+                          step={1}
+                          className="w-20 rounded-lg border border-zinc-200 px-2 py-1.5"
+                          value={
+                            metrics?.missingScans ?? String(row.missingScans)
+                          }
+                          onChange={(e) =>
+                            updateMonthlyMetrics(draftKey, {
+                                morningLateMinutes:
+                                  metrics?.morningLateMinutes ??
+                                  String(row.morningLateMinutes),
+                                breakLateMinutes:
+                                  metrics?.breakLateMinutes ??
+                                  String(row.breakLateMinutes),
+                                missingScans: e.target.value,
+                            })
+                          }
+                        />
+                      </td>
+                      <td className="py-3 pr-3 text-right">
+                        {moneyDZD(metrics ? editedAmount : row.calculatedAmount)}
                       </td>
                       <td className="py-3 pr-3">
                         <input
@@ -190,7 +325,7 @@ export default function AdminPointagesPage() {
                           className="w-36 rounded-lg border border-zinc-200 px-2 py-1.5"
                           value={
                             deductionDrafts[draftKey] ??
-                            String(row.amount)
+                            String(editedAmount)
                           }
                           onChange={(e) =>
                             setDeductionDrafts((drafts) => ({
@@ -223,7 +358,10 @@ export default function AdminPointagesPage() {
                           onClick={() =>
                             void saveMonthlyDeduction(
                               row.employeeId,
-                              row.amount
+                              row.amount,
+                              row.morningLateMinutes,
+                              row.breakLateMinutes,
+                              row.missingScans
                             )
                           }
                         >

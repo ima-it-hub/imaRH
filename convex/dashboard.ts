@@ -1,6 +1,7 @@
 import { query } from "./_generated/server";
 import { v } from "convex/values";
 import {
+  annualLeaveBalanceForYear,
   isFinanceDepartment,
   monthBounds,
   publicUser,
@@ -14,6 +15,7 @@ export const employeeHome = query({
   handler: async (ctx, args) => {
     const user = await requireUser(ctx, args.token);
     const date = todayISO();
+    const leaveYear = Number(date.slice(0, 4));
     const now = new Date();
     const { start, end } = monthBounds(now.getFullYear(), now.getMonth() + 1);
 
@@ -82,7 +84,14 @@ export const employeeHome = query({
       .slice(0, 8);
 
     return {
-      user: publicUser(user),
+      user: {
+        ...publicUser(user),
+        annualLeaveBalance: await annualLeaveBalanceForYear(
+          ctx,
+          user,
+          leaveYear
+        ),
+      },
       todayAttendance,
       lateMinutes,
       lastSalary,

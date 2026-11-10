@@ -17,6 +17,32 @@ type ScoreRow = {
   weightPercent: number;
 };
 
+function isoDateIsValid(value: string) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const date = new Date(`${value}T00:00:00Z`);
+  return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value;
+}
+
+function isMonday(value: string) {
+  return new Date(`${value}T00:00:00Z`).getUTCDay() === 1;
+}
+
+function addDays(value: string, days: number) {
+  const date = new Date(`${value}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+function dateRangeForMonth(year: number, month: number) {
+  const start = `${year}-${String(month).padStart(2, "0")}-01`;
+  const nextMonth =
+    month === 12
+      ? `${year + 1}-01-01`
+      : `${year}-${String(month + 1).padStart(2, "0")}-01`;
+  const end = addDays(nextMonth, -1);
+  return { start, end };
+}
+
 function reportStatus(
   row: { status?: "EN_ATTENTE" | "CONFIRME" }
 ): "EN_ATTENTE" | "CONFIRME" {
@@ -43,6 +69,7 @@ function employeeFacingReport(row: Doc<"monthlyReports">) {
 function fullReport(row: Doc<"monthlyReports">) {
   return {
     ...employeeFacingReport(row),
+    weeklyEvaluationCount: row.weeklyEvaluationCount,
     adminReport: row.adminReport ?? "",
     content: row.content ?? row.employeeReport ?? "",
     bonusId: row.bonusId ?? null,
@@ -62,7 +89,7 @@ async function buildScores(
   }
   for (const s of scoreInputs) {
     if (s.points < 1 || s.points > 5 || !Number.isFinite(s.points)) {
-      throw new Error("Chaque note doit être un entier entre 1 et 5");
+      throw new Error("Chaque note doit être comprise entre 1 et 5");
     }
   }
   const departmentConditions = employeeDepartmentId
@@ -103,7 +130,7 @@ async function buildScores(
     scored.push({
       conditionId: s.conditionId,
       label: condition.label,
-      points: Math.round(s.points),
+      points: Math.round(s.points * 10) / 10,
       weightPercent: conditionWeightById.get(condition._id) ?? 1,
     });
   }
@@ -188,6 +215,166 @@ export const conditionsForEmployee = query({
           ? (Math.max(0, condition.weightPercent ?? 0) / totalWeight) * 100
           : 100 / Math.max(1, active.length),
     }));
+  },
+});
+
+export const managerWeeklyEvaluation = query({
+  args: {
+    token: v.string(),
+    employeeId: v.id("users"),
+    weekStart: v.string(),
+  },
+  handler: async (ctx, args) => {
+    await requireManagerOf(ctx, args.token, args.employeeId);
+    if (!isoDateIsValid(args.weekStart) || !isMonday(args.weekStart)) {
+      throw new Error("La semaine doit commencer un lundi");
+    }
+    const row = await ctx.db
+      .query("weeklyEvaluations")
+      .withIndex("by_employee_week", (q) =>
+        q.eq("employeeId", args.employeeId).eq("weekStart", args.weekStart)
+      )
+      .unique();
+    return row
+      ? {
+          weekStart: row.weekStart,
+          scores: row.scores,
+          percentage: row.percentage,
+          adminMessage: row.adminMessage ?? "",
+          status: row.status ?? "CONFIRME",
+        }
+      : null;
+  },
+});
+
+export const monthlyWeeklyAverage = query({
+  args: {
+    token: v.string(),
+    employeeId: v.id("users"),
+    month: v.number(),
+    year: v.number(),
+  },
+  handler: async (ctx, args) => {
+    await requireManagerOf(ctx, args.token, args.employeeId);
+    if (
+      !Number.isInteger(args.month) ||
+      args.month < 1 ||
+      args.month > 12 ||
+      !Number.isInteger(args.year)
+    ) {
+      throw new Error("Période invalide");
+    }
+
+    const { start, end } = dateRangeForMonth(args.year, args.month);
+    const rows = await ctx.db
+      .query("weeklyEvaluations")
+      .withIndex("by_employee", (q) => q.eq("employeeId", args.employeeId))
+      .collect();
+    const monthRows = rows.filter(
+      (row) =>
+        (row.status === undefined || row.status === "CONFIRME") &&
+        row.weekStart <= end &&
+        addDays(row.weekStart, 6) >= start
+    );
+    const employee = await ctx.db.get(args.employeeId);
+    const activeConditionIds = new Set(
+      employee?.departmentId
+        ? (
+            await ctx.db
+              .query("evaluationConditions")
+              .withIndex("by_department_active", (q) =>
+                q
+                  .eq("departmentId", employee.departmentId!)
+                  .eq("isActive", true)
+              )
+              .collect()
+          ).map((condition) => condition._id)
+        : []
+    );
+    const totals = new Map<
+      string,
+      { conditionId: Id<"evaluationConditions">; label: string; sum: number; count: number; weightPercent: number }
+    >();
+    for (const row of monthRows) {
+      for (const score of row.scores) {
+        if (!activeConditionIds.has(score.conditionId)) continue;
+        const key = score.conditionId;
+        const total = totals.get(key) ?? {
+          conditionId: score.conditionId,
+          label: score.label,
+          sum: 0,
+          count: 0,
+          weightPercent: score.weightPercent ?? 1,
+        };
+        total.sum += score.points;
+        total.count += 1;
+        totals.set(key, total);
+      }
+    }
+    const scores = [...totals.values()].map((item) => ({
+      conditionId: item.conditionId,
+      label: item.label,
+      points: Math.round((item.sum / item.count) * 10) / 10,
+      weightPercent: item.weightPercent,
+    }));
+    return {
+      weekCount: new Set(monthRows.map((row) => row.weekStart)).size,
+      percentage: evaluationPercentage(scores),
+      scores,
+    };
+  },
+});
+
+export const weeklyEvaluationsForAdmin = query({
+  args: {
+    token: v.string(),
+    month: v.number(),
+    year: v.number(),
+    employeeId: v.optional(v.id("users")),
+  },
+  handler: async (ctx, args) => {
+    await requireAdminPage(ctx, args.token, "admin-rapports");
+    if (
+      !Number.isInteger(args.month) ||
+      args.month < 1 ||
+      args.month > 12 ||
+      !Number.isInteger(args.year)
+    ) {
+      throw new Error("Période invalide");
+    }
+    const { start, end } = dateRangeForMonth(args.year, args.month);
+    const firstWeekStart = addDays(
+      start,
+      -((new Date(`${start}T00:00:00Z`).getUTCDay() + 6) % 7)
+    );
+    const rows = await ctx.db
+      .query("weeklyEvaluations")
+      .withIndex("by_week", (q) =>
+        q.gte("weekStart", firstWeekStart).lte("weekStart", end)
+      )
+      .collect();
+    const result = [];
+    for (const row of rows) {
+      if (
+        (args.employeeId && row.employeeId !== args.employeeId) ||
+        row.weekStart > end ||
+        addDays(row.weekStart, 6) < start
+      ) {
+        continue;
+      }
+      const employee = await ctx.db.get(row.employeeId);
+      const manager = await ctx.db.get(row.managerId);
+      if (!employee) continue;
+      result.push({
+        ...row,
+        status: row.status ?? "CONFIRME",
+        adminMessage: row.adminMessage ?? "",
+        weekEnd: addDays(row.weekStart, 6),
+        employeeName: employee.name,
+        managerName: manager?.name ?? "—",
+      });
+    }
+    return result.sort((a, b) => b.weekStart.localeCompare(a.weekStart));
   },
 });
 
@@ -288,6 +475,160 @@ export const listTeamReports = query({
   },
 });
 
+export const saveWeeklyEvaluation = mutation({
+  args: {
+    token: v.string(),
+    employeeId: v.id("users"),
+    weekStart: v.string(),
+    adminMessage: v.string(),
+    scores: v.array(
+      v.object({
+        conditionId: v.id("evaluationConditions"),
+        points: v.number(),
+      })
+    ),
+  },
+  handler: async (ctx, args) => {
+    const manager = await requireManagerOf(ctx, args.token, args.employeeId);
+    if (!isoDateIsValid(args.weekStart) || !isMonday(args.weekStart)) {
+      throw new Error("La semaine doit commencer un lundi");
+    }
+    const employee = await ctx.db.get(args.employeeId);
+    if (!employee || employee.role !== "employee" || employee.resignedAt) {
+      throw new Error("Employé introuvable");
+    }
+    const activeConditions = employee.departmentId
+      ? await ctx.db
+          .query("evaluationConditions")
+          .withIndex("by_department_active", (q) =>
+            q.eq("departmentId", employee.departmentId!).eq("isActive", true)
+          )
+          .collect()
+      : [];
+    const submittedConditionIds = new Set(
+      args.scores.map((score) => score.conditionId)
+    );
+    if (
+      args.scores.length !== activeConditions.length ||
+      submittedConditionIds.size !== activeConditions.length ||
+      activeConditions.some(
+        (condition) => !submittedConditionIds.has(condition._id)
+      )
+    ) {
+      throw new Error(
+        "Évaluez toutes les conditions actives avant d'enregistrer la semaine."
+      );
+    }
+    const scores = await buildScores(ctx, employee.departmentId, args.scores);
+    const existing = await ctx.db
+      .query("weeklyEvaluations")
+      .withIndex("by_employee_week", (q) =>
+        q.eq("employeeId", args.employeeId).eq("weekStart", args.weekStart)
+      )
+      .unique();
+    if (
+      existing &&
+      (existing.status === undefined || existing.status === "CONFIRME")
+    ) {
+      throw new Error(
+        "Cette évaluation semaine est déjà confirmée et ne peut plus être modifiée."
+      );
+    }
+    const adminMessage = args.adminMessage.trim();
+    if (!adminMessage) {
+      throw new Error("Le message destiné à l'admin est obligatoire.");
+    }
+    const now = Date.now();
+    const payload = {
+      managerId: manager._id,
+      adminMessage,
+      scores,
+      percentage: evaluationPercentage(scores),
+      status: "EN_ATTENTE" as const,
+      updatedAt: now,
+    };
+    if (existing) {
+      await ctx.db.patch(existing._id, payload);
+      return await ctx.db.get(existing._id);
+    }
+    const id = await ctx.db.insert("weeklyEvaluations", {
+      employeeId: args.employeeId,
+      weekStart: args.weekStart,
+      ...payload,
+      createdAt: now,
+      submittedAt: now,
+    });
+    const admins = (await ctx.db.query("users").collect()).filter(
+      (user) => user.role === "admin" && user.isActive
+    );
+    for (const admin of admins) {
+      await notify(
+        ctx,
+        admin._id,
+        "Évaluation semaine à confirmer",
+        `${manager.name} a soumis l'évaluation semaine de ${employee.name} (${args.weekStart}).`
+      );
+    }
+    return await ctx.db.get(id);
+  },
+});
+
+export const confirmWeeklyEvaluation = mutation({
+  args: {
+    token: v.string(),
+    evaluationId: v.id("weeklyEvaluations"),
+    scores: v.array(
+      v.object({
+        conditionId: v.id("evaluationConditions"),
+        points: v.number(),
+      })
+    ),
+  },
+  handler: async (ctx, args) => {
+    const admin = await requireAdminPage(ctx, args.token, "admin-rapports");
+    const evaluation = await ctx.db.get(args.evaluationId);
+    if (!evaluation) throw new Error("Évaluation semaine introuvable.");
+    if (evaluation.status !== "EN_ATTENTE") {
+      throw new Error("Cette évaluation semaine a déjà été confirmée.");
+    }
+
+    const employee = await ctx.db.get(evaluation.employeeId);
+    if (!employee) throw new Error("Employé introuvable.");
+
+    const activeConditions = employee.departmentId
+      ? await ctx.db
+          .query("evaluationConditions")
+          .withIndex("by_department_active", (q) =>
+            q.eq("departmentId", employee.departmentId!).eq("isActive", true)
+          )
+          .collect()
+      : [];
+    const submittedConditionIds = new Set(
+      args.scores.map((score) => score.conditionId)
+    );
+    if (
+      args.scores.length !== activeConditions.length ||
+      submittedConditionIds.size !== activeConditions.length ||
+      activeConditions.some(
+        (condition) => !submittedConditionIds.has(condition._id)
+      )
+    ) {
+      throw new Error("Toutes les conditions actives doivent être notées.");
+    }
+    const scores = await buildScores(ctx, employee.departmentId, args.scores);
+    const now = Date.now();
+    await ctx.db.patch(evaluation._id, {
+      scores,
+      percentage: evaluationPercentage(scores),
+      status: "CONFIRME",
+      confirmedAt: now,
+      confirmedBy: admin._id,
+      updatedAt: now,
+    });
+    return await ctx.db.get(evaluation._id);
+  },
+});
+
 /** Manager (or admin draft): submit for admin confirmation — not visible to employee yet. */
 export const publish = mutation({
   args: {
@@ -309,12 +650,36 @@ export const publish = mutation({
   },
   handler: async (ctx, args) => {
     const author = await requireManagerOf(ctx, args.token, args.employeeId);
+    if (
+      !Number.isInteger(args.month) ||
+      args.month < 1 ||
+      args.month > 12 ||
+      !Number.isInteger(args.year)
+    ) {
+      throw new Error("Période invalide");
+    }
     const employee = await ctx.db.get(args.employeeId);
     if (!employee || employee.role !== "employee") {
       throw new Error("Employé introuvable");
     }
     if (employee.resignedAt) {
       throw new Error("Cet employé a démissionné");
+    }
+    const { start, end } = dateRangeForMonth(args.year, args.month);
+    const weeklyRows = await ctx.db
+      .query("weeklyEvaluations")
+      .withIndex("by_employee", (q) => q.eq("employeeId", args.employeeId))
+      .collect();
+    const weeklyEvaluationCount = weeklyRows.filter(
+      (row) =>
+        (row.status === undefined || row.status === "CONFIRME") &&
+        row.weekStart <= end &&
+        addDays(row.weekStart, 6) >= start
+    ).length;
+    if (weeklyEvaluationCount === 0) {
+      throw new Error(
+        "Enregistrez au moins une évaluation hebdomadaire avant le rapport mensuel."
+      );
     }
 
     const adminReport = (args.adminReport ?? "").trim();
@@ -363,6 +728,7 @@ export const publish = mutation({
       content: employeeReport,
       scores: scored,
       percentage,
+      weeklyEvaluationCount,
       baseBonus,
       computedBonus: 0,
       status: "EN_ATTENTE" as const,

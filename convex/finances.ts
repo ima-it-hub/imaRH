@@ -56,6 +56,10 @@ async function computeBalance(ctx: QueryCtx | MutationCtx, employeeId: Id<"users
     .query("approvedLateDeductions")
     .withIndex("by_employee", (q) => q.eq("employeeId", employeeId))
     .collect();
+  const annualLeaveSettlements = await ctx.db
+    .query("annualLeaveSettlements")
+    .withIndex("by_employee", (q) => q.eq("employeeId", employeeId))
+    .collect();
   const orders = await ctx.db
     .query("paymentOrders")
     .withIndex("by_employee", (q) => q.eq("employeeId", employeeId))
@@ -87,8 +91,15 @@ async function computeBalance(ctx: QueryCtx | MutationCtx, employeeId: Id<"users
     (sum, deduction) => sum + deduction.amount,
     0
   );
+  const totalAnnualLeaveAdjustments = annualLeaveSettlements.reduce(
+    (sum, settlement) => sum + settlement.amount,
+    0
+  );
   const totalCredits =
-    totalSalaries + availableBonuses - totalLateDeductions;
+    totalSalaries +
+    availableBonuses -
+    totalLateDeductions +
+    totalAnnualLeaveAdjustments;
 
   // Pending, validated, disbursed and paid requests reduce the available balance
   const reservedOrPaid = orders
@@ -104,6 +115,7 @@ async function computeBalance(ctx: QueryCtx | MutationCtx, employeeId: Id<"users
     totalBonuses,
     availableBonuses,
     totalLateDeductions,
+    totalAnnualLeaveAdjustments,
     totalCredits,
     reservedOrPaid,
     available,
@@ -169,6 +181,19 @@ export const myLateDeductions = query({
         year: row.year,
         amount: row.amount,
       }));
+  },
+});
+
+export const myAnnualLeaveSettlements = query({
+  args: { token: v.string() },
+  handler: async (ctx, args) => {
+    const user = await requireUser(ctx, args.token);
+    return (
+      await ctx.db
+        .query("annualLeaveSettlements")
+        .withIndex("by_employee", (q) => q.eq("employeeId", user._id))
+        .collect()
+    ).sort((a, b) => b.createdAt - a.createdAt);
   },
 });
 
@@ -322,8 +347,16 @@ export const salariesForMonth = query({
     await requireAdminPage(ctx, args.token, "admin-salaires");
     const employees = (await ctx.db.query("users").collect())
       .filter(
-        (u) =>
-          u.role === "employee" && u.isActive && !u.resignedAt
+        (u) => {
+          if (u.role !== "employee") return false;
+          if (u.isActive && !u.resignedAt) return true;
+          if (!u.resignedAt) return false;
+          const stopped = todayISO(new Date(u.resignedAt));
+          return (
+            Number(stopped.slice(0, 4)) === args.year &&
+            Number(stopped.slice(5, 7)) === args.month
+          );
+        }
       )
       .sort((a, b) => a.name.localeCompare(b.name));
 
@@ -358,7 +391,8 @@ export const salariesForMonth = query({
         contractual,
         employee.hireDate,
         args.year,
-        args.month
+        args.month,
+        employee.resignedAt
       );
 
       result.push({
@@ -592,7 +626,8 @@ export const setSalariesBatch = mutation({
         contractual,
         employee.hireDate,
         args.year,
-        args.month
+        args.month,
+        employee.resignedAt
       );
       const monthAmount = proration.amount;
 
@@ -693,7 +728,8 @@ export const setBaseSalary = mutation({
       contractual,
       employee.hireDate,
       args.year,
-      args.month
+      args.month,
+      employee.resignedAt
     );
     const monthAmount = proration.amount;
 
@@ -847,12 +883,17 @@ export const employeeHistory = query({
       .query("approvedLateDeductions")
       .withIndex("by_employee", (q) => q.eq("employeeId", args.employeeId))
       .collect();
+    const annualLeaveSettlements = await ctx.db
+      .query("annualLeaveSettlements")
+      .withIndex("by_employee", (q) => q.eq("employeeId", args.employeeId))
+      .collect();
 
     return {
       employee: publicUser(employee),
       salaries,
       bonuses,
       lateDeductions,
+      annualLeaveSettlements,
       orders,
       balance,
     };

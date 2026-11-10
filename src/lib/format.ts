@@ -40,6 +40,36 @@ export function annualLeaveMinStartISO(date = new Date()) {
   return addDaysISO(todayISOLocal(date), 16);
 }
 
+export const leaveTypeOptions = [
+  { value: "evenements_familiaux", label: "Congé pour événements familiaux" },
+  { value: "mariage", label: "Congé pour mariage" },
+  { value: "deces", label: "Congé de décès / deuil" },
+  { value: "examen_formation", label: "Congé d'examen / formation" },
+  { value: "recuperation", label: "Récupération (RTT / Repos)" },
+  { value: "autre", label: "Autre" },
+] as const;
+
+export type LeaveType =
+  | (typeof leaveTypeOptions)[number]["value"]
+  | "annuel"
+  | "maladie"
+  | "sans_solde";
+
+export function leaveTypeLabel(type: string) {
+  const option = leaveTypeOptions.find((item) => item.value === type);
+  if (option) return option.label;
+  switch (type) {
+    case "annuel":
+      return "Congé payé / annuel";
+    case "maladie":
+      return "Maladie";
+    case "sans_solde":
+      return "Sans solde";
+    default:
+      return type;
+  }
+}
+
 export function leaveStatusLabel(status: string) {
   switch (status) {
     case "EN_ATTENTE":

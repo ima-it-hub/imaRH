@@ -147,6 +147,7 @@ export function publicUser(user: Doc<"users">) {
     hireDate: user.hireDate ?? null,
     resignedAt: user.resignedAt ?? null,
     annualLeaveBalance: user.annualLeaveBalance ?? 0,
+    annualLeaveBalanceYear: user.annualLeaveBalanceYear ?? null,
     annualLeaveQuota: user.annualLeaveQuota ?? 30,
     baseSalary: user.baseSalary ?? 0,
     barcode: user.barcode ?? "",
@@ -338,6 +339,69 @@ export function monthBounds(year: number, month: number) {
   return { start, end };
 }
 
+export function annualLeaveEntitlement(
+  quota: number,
+  hireDate: number | null | undefined,
+  year: number,
+  employmentEndDate?: string
+) {
+  const yearStart = `${year}-01-01`;
+  const yearEnd = `${year}-12-31`;
+  const hiredOn = hireDate
+    ? todayISO(new Date(hireDate))
+    : yearStart;
+  const start = hiredOn > yearStart ? hiredOn : yearStart;
+  const end =
+    employmentEndDate && employmentEndDate < yearEnd
+      ? employmentEndDate
+      : yearEnd;
+  if (start > end) return 0;
+  const employedDays =
+    (Date.parse(`${end}T00:00:00Z`) -
+      Date.parse(`${start}T00:00:00Z`)) /
+      86_400_000 +
+    1;
+  const daysInYear =
+    (Date.parse(`${yearEnd}T00:00:00Z`) -
+      Date.parse(`${yearStart}T00:00:00Z`)) /
+      86_400_000 +
+    1;
+  return Math.round((Math.max(0, quota) * employedDays) / daysInYear);
+}
+
+export async function annualLeaveBalanceForYear(
+  ctx: QueryCtx | MutationCtx,
+  employee: Doc<"users">,
+  year: number
+) {
+  const storedBalance = employee.annualLeaveBalance ?? employee.annualLeaveQuota ?? 30;
+  if (employee.annualLeaveBalanceYear === year) return storedBalance;
+
+  const entitlement = annualLeaveEntitlement(
+    employee.annualLeaveQuota ?? 30,
+    employee.hireDate,
+    year,
+    employee.resignedAt
+      ? todayISO(new Date(employee.resignedAt))
+      : undefined
+  );
+  const leaves = await ctx.db
+    .query("leaves")
+    .withIndex("by_employee", (q) => q.eq("employeeId", employee._id))
+    .collect();
+  const usedDays = leaves.reduce((sum, leave) => {
+    const leaveStart = leave.actualStartDate ?? leave.startDate;
+    if (
+      !leave.balanceDeducted ||
+      leaveStart.slice(0, 4) !== String(year)
+    ) {
+      return sum;
+    }
+    return sum + (leave.deductedDays ?? leave.days);
+  }, 0);
+  return Math.max(0, entitlement - usedDays);
+}
+
 /** Calendar days in month (1–12). */
 export function daysInCalendarMonth(year: number, month: number) {
   return new Date(year, month, 0).getDate();
@@ -351,65 +415,45 @@ export function prorateMonthlySalary(
   fullSalary: number,
   hireDateMs: number | null | undefined,
   year: number,
-  month: number
+  month: number,
+  resignedAtMs?: number | null
 ) {
   const daysInMonth = daysInCalendarMonth(year, month);
   const full = Math.max(0, fullSalary);
-
-  if (!hireDateMs) {
-    return {
-      amount: full,
-      daysWorked: daysInMonth,
-      daysInMonth,
-      isProrated: false,
-      hireDay: null as number | null,
-      hiredThisMonth: false,
-      notYetHired: false,
-    };
-  }
-
-  const hireISO = new Date(hireDateMs).toLocaleDateString("en-CA", {
-    timeZone: APP_TIMEZONE,
-  });
-  const [hyStr, hmStr, hdStr] = hireISO.split("-");
-  const hy = Number(hyStr);
-  const hm = Number(hmStr);
-  const hd = Number(hdStr);
-
-  if (hy > year || (hy === year && hm > month)) {
-    return {
-      amount: 0,
-      daysWorked: 0,
-      daysInMonth,
-      isProrated: true,
-      hireDay: hd,
-      hiredThisMonth: false,
-      notYetHired: true,
-    };
-  }
-
-  if (hy < year || (hy === year && hm < month)) {
-    return {
-      amount: full,
-      daysWorked: daysInMonth,
-      daysInMonth,
-      isProrated: false,
-      hireDay: hd,
-      hiredThisMonth: false,
-      notYetHired: false,
-    };
-  }
-
-  const daysWorked = Math.max(0, daysInMonth - hd + 1);
+  const monthStart = `${year}-${String(month).padStart(2, "0")}-01`;
+  const monthEnd = `${year}-${String(month).padStart(2, "0")}-${String(daysInMonth).padStart(2, "0")}`;
+  const hireISO = hireDateMs
+    ? new Date(hireDateMs).toLocaleDateString("en-CA", {
+        timeZone: APP_TIMEZONE,
+      })
+    : monthStart;
+  const resignationISO = resignedAtMs
+    ? new Date(resignedAtMs).toLocaleDateString("en-CA", {
+        timeZone: APP_TIMEZONE,
+      })
+    : monthEnd;
+  const employedStart = hireISO > monthStart ? hireISO : monthStart;
+  const employedEnd = resignationISO < monthEnd ? resignationISO : monthEnd;
+  const outsideEmploymentPeriod = employedStart > employedEnd;
+  const startDay = Number(employedStart.slice(8, 10));
+  const endDay = Number(employedEnd.slice(8, 10));
+  const daysWorked = outsideEmploymentPeriod
+    ? 0
+    : Math.max(0, endDay - startDay + 1);
+  const hiredThisMonth =
+    hireISO.slice(0, 7) === `${year}-${String(month).padStart(2, "0")}`;
+  const notYetHired = hireISO > monthEnd || outsideEmploymentPeriod;
   const amount = Math.round((full * daysWorked) / daysInMonth);
   return {
-    amount,
-    daysWorked,
+    amount: notYetHired ? 0 : amount,
+    daysWorked: notYetHired ? 0 : daysWorked,
     daysInMonth,
     isProrated: daysWorked < daysInMonth,
-    hireDay: hd,
-    hiredThisMonth: true,
-    notYetHired: false,
+    hireDay: hireISO.slice(0, 7) === `${year}-${String(month).padStart(2, "0")}`
+      ? Number(hireISO.slice(8, 10))
+      : null as number | null,
+    hiredThisMonth,
+    notYetHired,
   };
 }
 
@@ -431,6 +475,7 @@ export async function getSettings(ctx: QueryCtx | MutationCtx) {
     const required = existing.requiredWorkMinutes ?? 480;
     return {
       ...existing,
+      breakMinutes: 0,
       workEndHour: existing.workEndHour ?? 17,
       workEndMinute: existing.workEndMinute ?? 0,
       requiredWorkMinutes: required,
@@ -453,6 +498,7 @@ export async function getSettings(ctx: QueryCtx | MutationCtx) {
     workEndHour: 17,
     workEndMinute: 0,
     lateToleranceMinutes: 10,
+    breakMinutes: 0,
     requiredWorkMinutes: 480,
     thursdayRequiredWorkMinutes: 240,
     thursdayWorkEndHour: 12,
@@ -482,6 +528,7 @@ export async function getEmployeeSettings(
     workEndMinute: workplace.workEndMinute ?? settings.workEndMinute,
     lateToleranceMinutes:
       workplace.lateToleranceMinutes ?? settings.lateToleranceMinutes,
+    breakMinutes: workplace.breakMinutes ?? 0,
     requiredWorkMinutes:
       workplace.requiredWorkMinutes ?? settings.requiredWorkMinutes,
     thursdayRequiredWorkMinutes:

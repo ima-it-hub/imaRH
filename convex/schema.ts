@@ -33,6 +33,7 @@ export default defineSchema({
     hireDate: v.optional(v.number()),
     resignedAt: v.optional(v.number()),
     annualLeaveBalance: v.optional(v.number()),
+    annualLeaveBalanceYear: v.optional(v.number()),
     annualLeaveQuota: v.optional(v.number()),
     baseSalary: v.optional(v.number()),
     barcode: v.optional(v.string()),
@@ -90,6 +91,7 @@ export default defineSchema({
     workEndHour: v.optional(v.number()),
     workEndMinute: v.optional(v.number()),
     lateToleranceMinutes: v.optional(v.number()),
+    breakMinutes: v.optional(v.number()),
     requiredWorkMinutes: v.optional(v.number()),
     thursdayRequiredWorkMinutes: v.optional(v.number()),
     thursdayWorkEndHour: v.optional(v.number()),
@@ -140,6 +142,9 @@ export default defineSchema({
     /** Minutes beyond required work duration */
     overtimeMinutes: v.optional(v.number()),
     lateMinutes: v.number(),
+    morningLateMinutes: v.optional(v.number()),
+    breakLateMinutes: v.optional(v.number()),
+    missingScans: v.optional(v.number()),
     /** Money deducted from solde for this day's delay */
     delayAmount: v.optional(v.number()),
     /** Raw overtime pay before approvals (salary rate × minutes × 2) */
@@ -198,7 +203,13 @@ export default defineSchema({
     type: v.union(
       v.literal("annuel"),
       v.literal("maladie"),
-      v.literal("sans_solde")
+      v.literal("sans_solde"),
+      v.literal("evenements_familiaux"),
+      v.literal("mariage"),
+      v.literal("deces"),
+      v.literal("examen_formation"),
+      v.literal("recuperation"),
+      v.literal("autre")
     ),
     startDate: v.string(),
     endDate: v.string(),
@@ -211,12 +222,7 @@ export default defineSchema({
       v.literal("CLOTURE")
     ),
     adminResponse: v.optional(v.string()),
-    /**
-     * For maladie: admin chooses before approval.
-     * true = paid (no annual / salary impact).
-     * false = unpaid (annual first, then salary).
-     * sans_solde is always unpaid; annuel uses annual balance.
-     */
+    /** Legacy leave types use this flag for their historical salary/balance rules. */
     isPaid: v.optional(v.boolean()),
     /** Actual dates entered by admin after return */
     actualStartDate: v.optional(v.string()),
@@ -272,6 +278,9 @@ export default defineSchema({
     month: v.number(),
     year: v.number(),
     amount: v.number(),
+    morningLateMinutes: v.optional(v.number()),
+    breakLateMinutes: v.optional(v.number()),
+    missingScans: v.optional(v.number()),
     approvedBy: v.id("users"),
     approvedAt: v.number(),
   })
@@ -292,6 +301,18 @@ export default defineSchema({
   })
     .index("by_employee", ["employeeId"])
     .index("by_report", ["reportId"]),
+
+  annualLeaveSettlements: defineTable({
+    employeeId: v.id("users"),
+    year: v.number(),
+    kind: v.union(v.literal("YEAR_END"), v.literal("RESIGNATION")),
+    days: v.number(),
+    amount: v.number(),
+    createdAt: v.number(),
+  })
+    .index("by_employee", ["employeeId"])
+    .index("by_employee_period", ["employeeId", "year"])
+    .index("by_employee_year_kind", ["employeeId", "year", "kind"]),
 
   paymentOrders: defineTable({
     employeeId: v.id("users"),
@@ -341,6 +362,7 @@ export default defineSchema({
       )
     ),
     percentage: v.optional(v.number()),
+    weeklyEvaluationCount: v.optional(v.number()),
     baseBonus: v.optional(v.number()),
     computedBonus: v.optional(v.number()),
     bonusId: v.optional(v.id("bonuses")),
@@ -356,6 +378,33 @@ export default defineSchema({
     .index("by_employee", ["employeeId"])
     .index("by_employee_period", ["employeeId", "year", "month"])
     .index("by_status", ["status"]),
+
+  weeklyEvaluations: defineTable({
+    employeeId: v.id("users"),
+    managerId: v.id("users"),
+    weekStart: v.string(),
+    adminMessage: v.optional(v.string()),
+    status: v.optional(
+      v.union(v.literal("EN_ATTENTE"), v.literal("CONFIRME"))
+    ),
+    scores: v.array(
+      v.object({
+        conditionId: v.id("evaluationConditions"),
+        label: v.string(),
+        points: v.number(),
+        weightPercent: v.optional(v.number()),
+      })
+    ),
+    percentage: v.number(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+    submittedAt: v.optional(v.number()),
+    confirmedAt: v.optional(v.number()),
+    confirmedBy: v.optional(v.id("users")),
+  })
+    .index("by_employee_week", ["employeeId", "weekStart"])
+    .index("by_week", ["weekStart"])
+    .index("by_employee", ["employeeId"]),
 
   /** Monthly unified base-prime calculation for employees and their managers */
   primeCalculations: defineTable({

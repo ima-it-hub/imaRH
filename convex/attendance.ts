@@ -8,6 +8,8 @@ import {
   algiersLocalToUtcMs,
   formatTimeAlgiers,
   getEmployeeSettings,
+  getSettings,
+  isThursdayAlgiers,
   monthBounds,
   publicUser,
   requireAdmin,
@@ -17,6 +19,7 @@ import {
   todayISO,
   workEndForDate,
   workEndMsForDate,
+  weekdayAlgiers,
 } from "./lib";
 
 function formatClock(ts: number) {
@@ -131,20 +134,45 @@ async function recalculateDay(
           Math.min(requiredMinutesForDate(settings, date), scheduleDuration)
         )
       : requiredMinutesForDate(settings, date);
+  const expectedScans =
+    isCompanyLeaveDay || isThursdayAlgiers(date) || settings.breakMinutes <= 0
+      ? 2
+      : 4;
+  const workStartMs = algiersLocalToUtcMs(
+    date,
+    settings.workStartHour,
+    settings.workStartMinute
+  );
+  const countedScans = [...scans]
+    .sort((a, b) => a - b)
+    .filter((scan) => scan >= workStartMs && scan <= workEndMs)
+    .slice(0, expectedScans);
   const workedMinutes = computeWorkedMinutes(
-    scans,
+    countedScans,
     Date.now(),
     workEndMs
   );
-  const firstScan = [...scans].sort((a, b) => a - b)[0];
-  const autoDelay = firstScan
+  const morningLateMinutes = countedScans[0]
     ? computeLateMinutes(
-        firstScan,
+        countedScans[0],
         settings.workStartHour,
         settings.workStartMinute,
         settings.lateToleranceMinutes
       )
     : 0;
+  const breakLateMinutes =
+    expectedScans === 4 && countedScans[1] != null && countedScans[2] != null
+      ? Math.max(
+          0,
+          Math.ceil(
+            (countedScans[2] -
+              countedScans[1] -
+              (settings.breakMinutes + settings.lateToleranceMinutes) * 60000) /
+              60000
+          )
+        )
+      : 0;
+  const autoDelay = morningLateMinutes + breakLateMinutes;
   const lateMinutes = isCompanyLeaveDay
     ? 0
     : options?.lateMinutesOverride !== undefined
@@ -154,11 +182,11 @@ async function recalculateDay(
   const delayAmount = computeDelayAmount(
     employee.baseSalary ?? 0,
     lateMinutes,
-    settings.requiredWorkMinutes,
+    requiredMinutes,
     settings.workingDaysPerMonth
   );
 
-  const sorted = [...scans].sort((a, b) => a - b);
+  const sorted = countedScans;
   const clockInAt = sorted[0];
   const clockOutAt =
     sorted.length >= 2 && sorted.length % 2 === 0
@@ -177,6 +205,13 @@ async function recalculateDay(
     workedMinutes,
     requiredMinutes,
     lateMinutes,
+    morningLateMinutes:
+      options?.lateMinutesOverride !== undefined
+        ? Math.max(0, Math.round(options.lateMinutesOverride))
+        : morningLateMinutes,
+    breakLateMinutes:
+      options?.lateMinutesOverride !== undefined ? 0 : breakLateMinutes,
+    missingScans: Math.max(0, expectedScans - sorted.length),
     delayAmount,
     lateAdjustedByAdmin: isCompanyLeaveDay
       ? false
@@ -255,7 +290,56 @@ async function registerScanAt(
     )
     .unique();
 
-  const previous = getScans(existing);
+  const employee = await ctx.db.get(employeeId);
+  if (!employee) throw new Error("Employé introuvable");
+  const settings = await getEmployeeSettings(ctx, employee);
+  const workStartMs = algiersLocalToUtcMs(
+    date,
+    settings.workStartHour,
+    settings.workStartMinute
+  );
+  const workEndMs = await getWorkEndMsForDay(ctx, employeeId, date, settings);
+  const companyHalfDay = await ctx.db
+    .query("companyHalfDaySchedules")
+    .withIndex("by_date", (q) => q.eq("date", date))
+    .first();
+  const employeeLeaves = await ctx.db
+    .query("leaves")
+    .withIndex("by_employee", (q) => q.eq("employeeId", employeeId))
+    .collect();
+  const legacyHalfDay = employeeLeaves.some(
+    (leave) =>
+      leave.companyLeaveHalfDay === true &&
+      leave.startDate <= date &&
+      date < leave.endDate
+  );
+  const expectedScans =
+    companyHalfDay ||
+    legacyHalfDay ||
+    isThursdayAlgiers(date) ||
+    settings.breakMinutes <= 0
+      ? 2
+      : 4;
+  const previous = getScans(existing)
+    .filter((scan) => scan >= workStartMs && scan <= workEndMs)
+    .sort((a, b) => a - b)
+    .slice(0, expectedScans);
+  const action = (previous.length % 2 === 0
+    ? "clock_in"
+    : "clock_out") as "clock_in" | "clock_out";
+
+  if (
+    scanAt < workStartMs ||
+    scanAt > workEndMs ||
+    previous.length >= expectedScans
+  ) {
+    return {
+      action,
+      attendance: existing,
+      scanCount: previous.length,
+      skipped: true as const,
+    };
+  }
 
   // Skip near-duplicate punches (device re-sync / double tap within 8s)
   if (
@@ -288,7 +372,6 @@ async function registerScanAt(
     throw new ConvexError("Scan trop rapide — attendez quelques secondes");
   }
 
-  // Punches after shift end are accepted but excluded from counted work time.
   const scans = [...previous, scanAt].sort((a, b) => a - b);
   const adminLocked = Boolean(existing?.lateAdjustedByAdmin);
   const computed = await recalculateDay(ctx, employeeId, date, scans, {
@@ -319,6 +402,11 @@ async function registerScan(ctx: MutationCtx, employeeId: Id<"users">) {
     allowNearDuplicateSkip: false,
     minGapMs: 5000,
   });
+  if (result.skipped) {
+    throw new ConvexError(
+      "Le scan est hors des horaires prévus ou le nombre de scans attendu est atteint"
+    );
+  }
   return {
     action: result.action,
     attendance: result.attendance,
@@ -540,6 +628,8 @@ export const monthlyLateDeductionsForAdmin = query({
     }
 
     const { start, end } = monthBounds(args.year, args.month);
+    const today = todayISO();
+    const calculationEnd = end < today ? end : today;
     const attendanceRows = await ctx.db
       .query("attendances")
       .withIndex("by_date", (q) => q.gte("date", start).lte("date", end))
@@ -550,48 +640,168 @@ export const monthlyLateDeductionsForAdmin = query({
         q.eq("year", args.year).eq("month", args.month)
       )
       .collect();
-
-    const employeeTotals = new Map<
-      string,
-      { employeeId: Id<"users">; calculatedAmount: number; lateMinutes: number }
-    >();
-    for (const attendance of attendanceRows) {
-      if ((attendance.delayAmount ?? 0) <= 0) continue;
-      const current = employeeTotals.get(attendance.employeeId) ?? {
-        employeeId: attendance.employeeId,
-        calculatedAmount: 0,
-        lateMinutes: 0,
-      };
-      current.calculatedAmount += attendance.delayAmount ?? 0;
-      current.lateMinutes += attendance.lateMinutes;
-      employeeTotals.set(attendance.employeeId, current);
-    }
+    const companyHalfDayDates = new Set(
+      (await ctx.db.query("companyHalfDaySchedules").collect()).map(
+        (schedule) => schedule.date
+      )
+    );
 
     const approvedByEmployee = new Map(
       periodRows.map((row) => [row.employeeId, row])
     );
-    for (const row of periodRows) {
-      if (!employeeTotals.has(row.employeeId)) {
-        employeeTotals.set(row.employeeId, {
-          employeeId: row.employeeId,
-          calculatedAmount: 0,
-          lateMinutes: 0,
-        });
-      }
+    const attendanceByEmployee = new Map<string, Map<string, Doc<"attendances">>>();
+    for (const row of attendanceRows) {
+      const byDate =
+        attendanceByEmployee.get(row.employeeId) ?? new Map<string, Doc<"attendances">>();
+      byDate.set(row.date, row);
+      attendanceByEmployee.set(row.employeeId, byDate);
     }
 
+    const employees = (await ctx.db.query("users").collect()).filter(
+      (employee) =>
+        employee.role === "employee" &&
+        (employee.isActive || approvedByEmployee.has(employee._id))
+    );
+    const settings = await getSettings(ctx);
     const result = [];
-    for (const item of employeeTotals.values()) {
-      const employee = await ctx.db.get(item.employeeId);
-      if (!employee) continue;
-      const approval = approvedByEmployee.get(item.employeeId);
+    for (const employee of employees) {
+      const settingsForEmployee = await getEmployeeSettings(ctx, employee);
+      const employeeLeaves = await ctx.db
+        .query("leaves")
+        .withIndex("by_employee", (q) => q.eq("employeeId", employee._id))
+        .collect();
+      const workdayAttendance = attendanceByEmployee.get(employee._id) ?? new Map();
+      let morningLateMinutes = 0;
+      let breakLateMinutes = 0;
+      let missingScans = 0;
+      let calculatedLateAmount = 0;
+      let totalRateableLateMinutes = 0;
+
+      const hireDate = employee.hireDate
+        ? todayISO(new Date(employee.hireDate))
+        : start;
+      const resignedDate = employee.resignedAt
+        ? todayISO(new Date(employee.resignedAt))
+        : undefined;
+      for (
+        let day = new Date(`${start}T00:00:00Z`);
+        day.toISOString().slice(0, 10) <= calculationEnd;
+        day.setUTCDate(day.getUTCDate() + 1)
+      ) {
+        const date = day.toISOString().slice(0, 10);
+        if (
+          weekdayAlgiers(date) === 5 ||
+          companyHalfDayDates.has(date) ||
+          date < hireDate ||
+          (resignedDate && date > resignedDate)
+        ) {
+          continue;
+        }
+        const leaveDay = employeeLeaves.some(
+          (leave) =>
+            ((leave.status === "APPROUVE" || leave.status === "CLOTURE") ||
+              Boolean(leave.companyLeaveName)) &&
+            leave.startDate <= date &&
+            date < leave.endDate
+        );
+        if (leaveDay) continue;
+
+        const expectedScans =
+          isThursdayAlgiers(date) || settingsForEmployee.breakMinutes <= 0
+            ? 2
+            : 4;
+        const attendance = workdayAttendance.get(date);
+        const workEndMs = workEndMsForDate(settingsForEmployee, date);
+        const workStartMs = algiersLocalToUtcMs(
+          date,
+          settingsForEmployee.workStartHour,
+          settingsForEmployee.workStartMinute
+        );
+        const scans = getScans(attendance ?? null)
+          .filter((scan) => scan >= workStartMs && scan <= workEndMs)
+          .sort((a, b) => a - b)
+          .slice(0, expectedScans);
+        if (date < today || Date.now() >= workEndMs) {
+          missingScans += Math.max(0, expectedScans - scans.length);
+        }
+
+        let dayMorningLateMinutes = 0;
+        if (scans[0] != null) {
+          const threshold = workStartMs + settingsForEmployee.lateToleranceMinutes * 60000;
+          dayMorningLateMinutes = Math.max(
+            0,
+            Math.ceil((scans[0] - threshold) / 60000)
+          );
+        }
+        let dayBreakLateMinutes = 0;
+        if (
+          expectedScans === 4 &&
+          scans[1] != null &&
+          scans[2] != null
+        ) {
+          const returnThreshold =
+            scans[1] +
+            (settingsForEmployee.breakMinutes +
+              settingsForEmployee.lateToleranceMinutes) *
+              60000;
+          dayBreakLateMinutes = Math.max(
+            0,
+            Math.ceil((scans[2] - returnThreshold) / 60000)
+          );
+        }
+        if (attendance?.lateAdjustedByAdmin) {
+          dayMorningLateMinutes = attendance.lateMinutes;
+          dayBreakLateMinutes = 0;
+        }
+        morningLateMinutes += dayMorningLateMinutes;
+        breakLateMinutes += dayBreakLateMinutes;
+        const dayLateMinutes = dayMorningLateMinutes + dayBreakLateMinutes;
+        totalRateableLateMinutes += dayLateMinutes;
+        calculatedLateAmount += computeDelayAmount(
+          employee.baseSalary ?? 0,
+          dayLateMinutes,
+          requiredMinutesForDate(settingsForEmployee, date),
+          settings.workingDaysPerMonth
+        );
+      }
+
+      const noScanDeduction =
+        Math.floor(missingScans / 4) *
+        ((employee.baseSalary ?? 0) / settings.workingDaysPerMonth / 2);
+      const calculatedAmount = Math.round(
+        calculatedLateAmount + noScanDeduction
+      );
+      const approval = approvedByEmployee.get(employee._id);
+      if (
+        !approval &&
+        morningLateMinutes === 0 &&
+        breakLateMinutes === 0 &&
+        missingScans === 0
+      ) {
+        continue;
+      }
       result.push({
-        employeeId: item.employeeId,
+        employeeId: employee._id,
         employeeName: employee.name,
-        lateMinutes: item.lateMinutes,
-        calculatedAmount: item.calculatedAmount,
+        morningLateMinutes:
+          approval?.morningLateMinutes ?? morningLateMinutes,
+        breakLateMinutes:
+          approval?.breakLateMinutes ?? breakLateMinutes,
+        lateMinutes:
+          (approval?.morningLateMinutes ?? morningLateMinutes) +
+          (approval?.breakLateMinutes ?? breakLateMinutes),
+        missingScans: approval?.missingScans ?? missingScans,
+        calculatedAmount,
+        lateMinuteRate:
+          totalRateableLateMinutes > 0
+            ? calculatedLateAmount / totalRateableLateMinutes
+            : (employee.baseSalary ?? 0) /
+              settings.workingDaysPerMonth /
+              settingsForEmployee.requiredWorkMinutes,
+        halfDayAmount:
+          (employee.baseSalary ?? 0) / settings.workingDaysPerMonth / 2,
         approvedAmount: approval?.amount ?? null,
-        amount: approval?.amount ?? item.calculatedAmount,
+        amount: approval?.amount ?? calculatedAmount,
       });
     }
     return result.sort((a, b) => a.employeeName.localeCompare(b.employeeName));
@@ -605,6 +815,9 @@ export const approveMonthlyLateDeduction = mutation({
     month: v.number(),
     year: v.number(),
     amount: v.number(),
+    morningLateMinutes: v.number(),
+    breakLateMinutes: v.number(),
+    missingScans: v.number(),
   },
   handler: async (ctx, args) => {
     const admin = await requireAdminPage(ctx, args.token, "admin-pointages");
@@ -613,6 +826,16 @@ export const approveMonthlyLateDeduction = mutation({
     }
     if (!Number.isFinite(args.amount) || args.amount < 0) {
       throw new Error("Montant de retenue invalide");
+    }
+    if (
+      !Number.isInteger(args.morningLateMinutes) ||
+      args.morningLateMinutes < 0 ||
+      !Number.isInteger(args.breakLateMinutes) ||
+      args.breakLateMinutes < 0 ||
+      !Number.isInteger(args.missingScans) ||
+      args.missingScans < 0
+    ) {
+      throw new Error("Les totaux de retard et de scans doivent être positifs");
     }
     const employee = await ctx.db.get(args.employeeId);
     if (!employee || employee.role !== "employee") {
@@ -630,6 +853,9 @@ export const approveMonthlyLateDeduction = mutation({
       .unique();
     const approval = {
       amount: args.amount,
+      morningLateMinutes: args.morningLateMinutes,
+      breakLateMinutes: args.breakLateMinutes,
+      missingScans: args.missingScans,
       approvedBy: admin._id,
       approvedAt: Date.now(),
     };

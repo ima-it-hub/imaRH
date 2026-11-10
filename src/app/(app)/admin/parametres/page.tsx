@@ -24,6 +24,7 @@ type WorkplaceDraft = {
   workStart: string;
   workEnd: string;
   lateToleranceMinutes: string;
+  breakMinutes: string;
   requiredWorkMinutes: string;
   thursdayRequiredWorkMinutes: string;
   thursdayWorkEnd: string;
@@ -81,6 +82,7 @@ export default function AdminParametresPage() {
         lateToleranceMinutes: String(
           workplace.lateToleranceMinutes ?? settings.lateToleranceMinutes
         ),
+        breakMinutes: String(workplace.breakMinutes ?? 0),
         requiredWorkMinutes: String(
           workplace.requiredWorkMinutes ?? settings.requiredWorkMinutes ?? 480
         ),
@@ -128,6 +130,7 @@ export default function AdminParametresPage() {
           workEndHour: settings.workEndHour ?? 17,
           workEndMinute: settings.workEndMinute ?? 0,
           lateToleranceMinutes: settings.lateToleranceMinutes,
+          breakMinutes: 0,
           requiredWorkMinutes: settings.requiredWorkMinutes ?? 480,
           thursdayRequiredWorkMinutes:
             settings.thursdayRequiredWorkMinutes ?? 240,
@@ -176,6 +179,7 @@ export default function AdminParametresPage() {
           workEndHour: end.hour,
           workEndMinute: end.minute,
           lateToleranceMinutes: Number(draft.lateToleranceMinutes),
+          breakMinutes: Number(draft.breakMinutes),
           requiredWorkMinutes: Number(draft.requiredWorkMinutes),
           thursdayRequiredWorkMinutes: Number(
             draft.thursdayRequiredWorkMinutes
@@ -405,7 +409,7 @@ export default function AdminParametresPage() {
                           }
                         />
                       </Field>
-                      <div className="grid grid-cols-2 gap-3">
+                      <div className="grid grid-cols-3 gap-3">
                         <Field label="Début de journée">
                           <input
                             required
@@ -465,6 +469,22 @@ export default function AdminParametresPage() {
                               updateWorkplaceDraft(
                                 workplace._id,
                                 "lateToleranceMinutes",
+                                e.target.value
+                              )
+                            }
+                          />
+                        </Field>
+                        <Field label="Pause (minutes)">
+                          <input
+                            required
+                            type="number"
+                            min={0}
+                            className={inputClass}
+                            value={draft.breakMinutes}
+                            onChange={(e) =>
+                              updateWorkplaceDraft(
+                                workplace._id,
+                                "breakMinutes",
                                 e.target.value
                               )
                             }

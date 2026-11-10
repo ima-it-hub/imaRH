@@ -2,7 +2,9 @@
 
 import { FormEvent, useMemo, useState } from "react";
 import { useMutation, useQuery } from "convex/react";
+import { Pencil } from "lucide-react";
 import { api } from "../../../../../convex/_generated/api";
+import type { Id } from "../../../../../convex/_generated/dataModel";
 import { PageShell } from "@/components/PageShell";
 import { RequireAuth } from "@/components/RequireAuth";
 import {
@@ -17,6 +19,9 @@ import { useAuth } from "@/lib/auth";
 import {
   annualLeaveMinStartISO,
   formatDate,
+  leaveTypeLabel,
+  leaveTypeOptions,
+  type LeaveType,
   leaveStatusLabel,
   statusBadgeClass,
 } from "@/lib/format";
@@ -32,10 +37,15 @@ function leaveDaysPreview(start: string, end: string) {
 export default function CongesPage() {
   const { token, user } = useAuth();
   const leaves = useQuery(api.leaves.myLeaves, token ? { token } : "skip");
+  const annualBalance = useQuery(
+    api.leaves.myBalance,
+    token ? { token } : "skip"
+  );
   const requestLeave = useMutation(api.leaves.request);
+  const updateLeave = useMutation(api.leaves.updateMyPendingRequest);
 
-  const [type, setType] = useState<"annuel" | "maladie" | "sans_solde">(
-    "annuel"
+  const [type, setType] = useState<LeaveType>(
+    leaveTypeOptions[0].value
   );
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
@@ -43,8 +53,10 @@ export default function CongesPage() {
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
   const [busy, setBusy] = useState(false);
+  const [editingLeaveId, setEditingLeaveId] =
+    useState<Id<"leaves"> | null>(null);
 
-  const balance = user?.annualLeaveBalance ?? 0;
+  const balance = annualBalance ?? user?.annualLeaveBalance ?? 0;
   const quota = user?.annualLeaveQuota ?? 30;
   const percent = Math.min(
     100,
@@ -57,7 +69,7 @@ export default function CongesPage() {
     [startDate, endDate]
   );
 
-  function onTypeChange(next: "annuel" | "maladie" | "sans_solde") {
+  function onTypeChange(next: LeaveType) {
     setType(next);
     if (next === "annuel" && startDate && startDate < annualMinStart) {
       setStartDate("");
@@ -72,8 +84,21 @@ export default function CongesPage() {
     setError("");
     setSuccess("");
     try {
-      await requestLeave({ token, type, startDate, endDate, reason });
-      setSuccess("Demande envoyée");
+      if (editingLeaveId) {
+        await updateLeave({
+          token,
+          leaveId: editingLeaveId,
+          type,
+          startDate,
+          endDate,
+          reason,
+        });
+        setSuccess("Demande modifiée");
+      } else {
+        await requestLeave({ token, type, startDate, endDate, reason });
+        setSuccess("Demande envoyée");
+      }
+      setEditingLeaveId(null);
       setReason("");
       setStartDate("");
       setEndDate("");
@@ -82,6 +107,28 @@ export default function CongesPage() {
     } finally {
       setBusy(false);
     }
+  }
+
+  function onEditLeave(leave: NonNullable<typeof leaves>[number]) {
+    if (leave.status !== "EN_ATTENTE" || leave.companyLeaveName) return;
+    setEditingLeaveId(leave._id);
+    setType(leave.type);
+    setStartDate(leave.startDate);
+    setEndDate(leave.endDate);
+    setReason(leave.reason);
+    setError("");
+    setSuccess("");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  function onCancelEdit() {
+    setEditingLeaveId(null);
+    setType(leaveTypeOptions[0].value);
+    setStartDate("");
+    setEndDate("");
+    setReason("");
+    setError("");
+    setSuccess("");
   }
 
   function onPrint() {
@@ -136,7 +183,9 @@ export default function CongesPage() {
 
         <div className="grid min-w-0 gap-5 lg:grid-cols-[minmax(0,340px)_minmax(0,1fr)]">
           <Card className="min-w-0">
-            <h2 className="font-semibold text-zinc-900">Nouvelle demande</h2>
+            <h2 className="font-semibold text-zinc-900">
+              {editingLeaveId ? "Modifier la demande" : "Nouvelle demande"}
+            </h2>
             <form onSubmit={onSubmit} className="mt-4 space-y-3">
               <Field label="Type">
                 <select
@@ -144,13 +193,19 @@ export default function CongesPage() {
                   value={type}
                   onChange={(e) =>
                     onTypeChange(
-                      e.target.value as "annuel" | "maladie" | "sans_solde"
+                      e.target.value as LeaveType
                     )
                   }
                 >
-                  <option value="annuel">Congé payé / annuel</option>
-                  <option value="maladie">Maladie</option>
-                  <option value="sans_solde">Sans solde</option>
+                  {leaveTypeOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                  {editingLeaveId &&
+                  ["annuel", "maladie", "sans_solde"].includes(type) ? (
+                    <option value={type}>{leaveTypeLabel(type)}</option>
+                  ) : null}
                 </select>
               </Field>
 
@@ -195,10 +250,18 @@ export default function CongesPage() {
                   {formatDate(annualMinStart)} (délai de 15 jours).
                 </p>
               ) : null}
+              {type !== "maladie" && type !== "sans_solde" ? (
+                <p className="text-xs text-zinc-500">
+                  Les jours demandés seront décomptés de votre solde annuel
+                  (actuellement {balance} jour(s)).
+                </p>
+              ) : null}
 
-              <Field label="Motif">
+              <Field
+                label={type === "autre" ? "Motif (obligatoire)" : "Motif (optionnel)"}
+              >
                 <textarea
-                  required
+                  required={type === "autre"}
                   className={inputClass}
                   rows={3}
                   value={reason}
@@ -209,9 +272,25 @@ export default function CongesPage() {
               {success ? (
                 <p className="text-sm text-emerald-600">{success}</p>
               ) : null}
-              <PrimaryButton type="submit" disabled={busy} className="w-full">
-                {busy ? "Envoi…" : "Envoyer la demande"}
-              </PrimaryButton>
+              <div className="flex flex-col gap-2">
+                <PrimaryButton type="submit" disabled={busy} className="w-full">
+                  {busy
+                    ? "Enregistrement…"
+                    : editingLeaveId
+                      ? "Enregistrer les modifications"
+                      : "Envoyer la demande"}
+                </PrimaryButton>
+                {editingLeaveId ? (
+                  <SecondaryButton
+                    type="button"
+                    disabled={busy}
+                    className="w-full"
+                    onClick={onCancelEdit}
+                  >
+                    Annuler
+                  </SecondaryButton>
+                ) : null}
+              </div>
             </form>
           </Card>
 
@@ -237,7 +316,7 @@ export default function CongesPage() {
                                 }`
                               : ""
                           }`
-                        : leave.type.replace("_", " ")}
+                        : leaveTypeLabel(leave.type)}
                     </p>
                     <Badge className={statusBadgeClass(leave.status)}>
                       {leaveStatusLabel(leave.status)}
@@ -279,6 +358,17 @@ export default function CongesPage() {
                       Réponse : {leave.adminResponse}
                     </p>
                   ) : null}
+                  {leave.status === "EN_ATTENTE" && !leave.companyLeaveName ? (
+                    <SecondaryButton
+                      type="button"
+                      className="mt-3 p-2"
+                      aria-label="Modifier la demande de congé"
+                      title="Modifier"
+                      onClick={() => onEditLeave(leave)}
+                    >
+                      <Pencil aria-hidden="true" className="h-4 w-4" />
+                    </SecondaryButton>
+                  ) : null}
                 </div>
               ))}
               {!leaves?.length ? (
@@ -297,6 +387,7 @@ export default function CongesPage() {
                     <th className="pb-3 pr-3 text-right">Jours</th>
                     <th className="pb-3 pr-3 text-left">Statut</th>
                     <th className="pb-3 text-left">Motif</th>
+                    <th className="pb-3 text-left">Action</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -313,7 +404,7 @@ export default function CongesPage() {
                                   }`
                                 : ""
                             }`
-                          : leave.type.replace("_", " ")}
+                          : leaveTypeLabel(leave.type)}
                       </td>
                       <td className="py-3 pr-3 whitespace-nowrap text-zinc-600">
                         {leave.startDate} → {leave.endDate}
@@ -341,6 +432,20 @@ export default function CongesPage() {
                           <p className="mt-1 text-xs text-zinc-400">
                             Réponse : {leave.adminResponse}
                           </p>
+                        ) : null}
+                      </td>
+                      <td className="py-3">
+                        {leave.status === "EN_ATTENTE" &&
+                        !leave.companyLeaveName ? (
+                          <SecondaryButton
+                            type="button"
+                            className="p-2"
+                            aria-label="Modifier la demande de congé"
+                            title="Modifier"
+                            onClick={() => onEditLeave(leave)}
+                          >
+                            <Pencil aria-hidden="true" className="h-4 w-4" />
+                          </SecondaryButton>
                         ) : null}
                       </td>
                     </tr>

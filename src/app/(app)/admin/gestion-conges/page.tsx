@@ -16,7 +16,13 @@ import {
   inputClass,
 } from "@/components/ui";
 import { useAuth } from "@/lib/auth";
-import { leaveStatusLabel, statusBadgeClass } from "@/lib/format";
+import {
+  leaveStatusLabel,
+  leaveTypeLabel,
+  leaveTypeOptions,
+  statusBadgeClass,
+  type LeaveType,
+} from "@/lib/format";
 
 /** End/return date is not counted as leave. */
 function daysBetweenLocal(start: string, end: string) {
@@ -73,10 +79,9 @@ export default function AdminCongesPage() {
   >({});
   const [showCreate, setShowCreate] = useState(false);
   const [newEmpId, setNewEmpId] = useState("");
-  const [newType, setNewType] = useState<"annuel" | "maladie" | "sans_solde">(
-    "annuel"
+  const [newType, setNewType] = useState<LeaveType>(
+    leaveTypeOptions[0].value
   );
-  const [newIsPaid, setNewIsPaid] = useState<"" | "paid" | "unpaid">("");
   const [newStart, setNewStart] = useState("");
   const [newEnd, setNewEnd] = useState("");
   const [newReason, setNewReason] = useState("");
@@ -204,8 +209,8 @@ export default function AdminCongesPage() {
   async function onCreateLeave(e: FormEvent) {
     e.preventDefault();
     if (!token || !newEmpId) return;
-    if (newType === "maladie" && !newIsPaid) {
-      setFormError("Choisissez si le congé maladie est payé ou non payé");
+    if (newType === "autre" && !newReason.trim()) {
+      setFormError("Le motif est obligatoire pour le type Autre");
       return;
     }
     setFormError("");
@@ -218,12 +223,6 @@ export default function AdminCongesPage() {
         endDate: newEnd,
         reason: newReason,
         autoApprove,
-        isPaid:
-          newType === "maladie"
-            ? newIsPaid === "paid"
-            : newType === "sans_solde"
-              ? false
-              : undefined,
       });
       setMsg(
         autoApprove
@@ -233,7 +232,6 @@ export default function AdminCongesPage() {
       setNewReason("");
       setNewStart("");
       setNewEnd("");
-      setNewIsPaid("");
       setShowCreate(false);
     } catch (err) {
       setFormError(err instanceof Error ? err.message : "Erreur");
@@ -289,7 +287,7 @@ export default function AdminCongesPage() {
   async function onDecide(
     leaveId: Id<"leaves">,
     status: "APPROUVE" | "REFUSE",
-    leaveType: "annuel" | "maladie" | "sans_solde"
+    leaveType: LeaveType
   ) {
     if (!token) return;
     if (status === "APPROUVE" && leaveType === "maladie") {
@@ -399,7 +397,7 @@ export default function AdminCongesPage() {
                     {leave.employee.name}
                   </p>
                   <p className="text-sm text-zinc-500">
-                    {leave.type} · {leave.days} jour(s) demandés · solde{" "}
+                    {leaveTypeLabel(leave.type)} · {leave.days} jour(s) demandés · solde{" "}
                     {leave.employee.annualLeaveBalance}
                   </p>
                   <p className="mt-1 text-sm text-zinc-600">
@@ -517,7 +515,7 @@ export default function AdminCongesPage() {
                 <div className="space-y-3">
                   <div>
                     <p className="font-semibold text-zinc-900">
-                      {leave.employee.name} · {leave.type}
+                      {leave.employee.name} · {leaveTypeLabel(leave.type)}
                       {leave.type === "maladie"
                         ? leave.isPaid === true
                           ? " (payé)"
@@ -665,7 +663,7 @@ export default function AdminCongesPage() {
                                 }`
                               : ""
                           }`
-                        : leave.type}
+                        : leaveTypeLabel(leave.type)}
                       {leave.type === "maladie"
                         ? leave.isPaid === true
                           ? " · payé"
@@ -779,33 +777,19 @@ export default function AdminCongesPage() {
                 className={inputClass}
                 value={newType}
                 onChange={(e) => {
-                  setNewType(
-                    e.target.value as "annuel" | "maladie" | "sans_solde"
-                  );
-                  setNewIsPaid("");
+                  setNewType(e.target.value as LeaveType);
                 }}
               >
-                <option value="annuel">Annuel</option>
-                <option value="maladie">Maladie</option>
-                <option value="sans_solde">Sans solde</option>
+                {leaveTypeOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
               </select>
             </Field>
-            {newType === "maladie" ? (
-              <Field label="Maladie — payé ou non ?">
-                <select
-                  required
-                  className={inputClass}
-                  value={newIsPaid}
-                  onChange={(e) =>
-                    setNewIsPaid(e.target.value as "" | "paid" | "unpaid")
-                  }
-                >
-                  <option value="">Choisir…</option>
-                  <option value="paid">Payé</option>
-                  <option value="unpaid">Non payé</option>
-                </select>
-              </Field>
-            ) : null}
+            <p className="text-xs text-zinc-500">
+              Les jours de congé seront décomptés du solde annuel de l&apos;employé.
+            </p>
             <Field label="Date début">
               <input
                 required
@@ -824,9 +808,15 @@ export default function AdminCongesPage() {
                 onChange={(e) => setNewEnd(e.target.value)}
               />
             </Field>
-            <Field label="Motif / remarque">
+            <Field
+              label={
+                newType === "autre"
+                  ? "Motif (obligatoire)"
+                  : "Motif / remarque (optionnel)"
+              }
+            >
               <textarea
-                required
+                required={newType === "autre"}
                 rows={2}
                 className={inputClass}
                 value={newReason}

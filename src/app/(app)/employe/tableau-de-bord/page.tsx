@@ -10,6 +10,7 @@ import { Badge, Card, StatCard } from "@/components/ui";
 import { useAuth } from "@/lib/auth";
 import {
   leaveStatusLabel,
+  leaveTypeLabel,
   moneyDZD,
   paymentStatusLabel,
   statusBadgeClass,
@@ -61,8 +62,7 @@ export default function EmployeeDashboardPage() {
             {workSchedule ? (
               <p className="mt-2 text-xs text-zinc-500">
                 {workSchedule.workplace} · {workSchedule.startTime}–
-                {workSchedule.endTime} · durée requise{" "}
-                {workSchedule.requiredWorkMinutes} min
+                {workSchedule.endTime}
               </p>
             ) : null}
             <div className="mt-4 flex flex-wrap gap-3 text-sm text-zinc-600">
@@ -165,7 +165,7 @@ export default function EmployeeDashboardPage() {
                   >
                     <div>
                       <p className="text-sm font-medium text-zinc-900">
-                        Congé {leave.type}
+                        {leaveTypeLabel(leave.type)}
                       </p>
                       <p className="text-xs text-zinc-500">
                         {leave.startDate} → {leave.endDate}

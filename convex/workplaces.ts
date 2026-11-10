@@ -8,6 +8,7 @@ const scheduleValidator = v.object({
   workEndHour: v.number(),
   workEndMinute: v.number(),
   lateToleranceMinutes: v.number(),
+  breakMinutes: v.number(),
   requiredWorkMinutes: v.number(),
   thursdayRequiredWorkMinutes: v.number(),
   thursdayWorkEndHour: v.number(),
@@ -20,6 +21,7 @@ function validateSchedule(schedule: {
   workEndHour: number;
   workEndMinute: number;
   lateToleranceMinutes: number;
+  breakMinutes: number;
   requiredWorkMinutes: number;
   thursdayRequiredWorkMinutes: number;
   thursdayWorkEndHour: number;
@@ -51,6 +53,8 @@ function validateSchedule(schedule: {
   if (
     !Number.isInteger(schedule.lateToleranceMinutes) ||
     schedule.lateToleranceMinutes < 0 ||
+    !Number.isInteger(schedule.breakMinutes) ||
+    schedule.breakMinutes < 0 ||
     !Number.isInteger(schedule.requiredWorkMinutes) ||
     schedule.requiredWorkMinutes <= 0 ||
     !Number.isInteger(schedule.thursdayRequiredWorkMinutes) ||
