@@ -5,7 +5,7 @@ import {
   evaluationPercentage,
   notify,
   publicUser,
-  requireAdmin,
+  requireAdminPage,
   requireManagerOf,
   requireUser,
 } from "./lib";
@@ -14,6 +14,7 @@ type ScoreRow = {
   conditionId: Id<"evaluationConditions">;
   label: string;
   points: number;
+  weightPercent: number;
 };
 
 function reportStatus(
@@ -64,6 +65,27 @@ async function buildScores(
       throw new Error("Chaque note doit être un entier entre 1 et 5");
     }
   }
+  const departmentConditions = employeeDepartmentId
+    ? await ctx.db
+        .query("evaluationConditions")
+        .withIndex("by_department_active", (q) =>
+          q.eq("departmentId", employeeDepartmentId).eq("isActive", true)
+        )
+        .collect()
+    : [];
+  const activeWeightTotal = departmentConditions.reduce(
+    (sum, condition) => sum + Math.max(0, condition.weightPercent ?? 0),
+    0
+  );
+  const conditionWeightById = new Map(
+    departmentConditions.map((condition) => [
+      condition._id,
+      activeWeightTotal > 0
+        ? (Math.max(0, condition.weightPercent ?? 0) / activeWeightTotal) *
+          100
+        : 100 / Math.max(1, departmentConditions.length),
+    ])
+  );
   const scored: ScoreRow[] = [];
   for (const s of scoreInputs) {
     const condition = await ctx.db.get(s.conditionId);
@@ -82,6 +104,7 @@ async function buildScores(
       conditionId: s.conditionId,
       label: condition.label,
       points: Math.round(s.points),
+      weightPercent: conditionWeightById.get(condition._id) ?? 1,
     });
   }
   return scored;
@@ -151,26 +174,76 @@ export const conditionsForEmployee = query({
         q.eq("departmentId", employee.departmentId!)
       )
       .collect();
-    return rows
+    const active = rows
       .filter((c) => c.isActive)
       .sort((a, b) => a.sortOrder - b.sortOrder);
+    const totalWeight = active.reduce(
+      (sum, condition) => sum + Math.max(0, condition.weightPercent ?? 0),
+      0
+    );
+    return active.map((condition) => ({
+      ...condition,
+      weightPercent:
+        totalWeight > 0
+          ? (Math.max(0, condition.weightPercent ?? 0) / totalWeight) * 100
+          : 100 / Math.max(1, active.length),
+    }));
   },
 });
 
 export const listAll = query({
   args: { token: v.string() },
   handler: async (ctx, args) => {
-    await requireAdmin(ctx, args.token);
+    await requireAdminPage(ctx, args.token, "admin-rapports");
     const rows = await ctx.db.query("monthlyReports").collect();
     const result = [];
+    const conditionWeightsByDepartment = new Map<
+      Id<"departments">,
+      Record<string, number>
+    >();
     for (const row of rows) {
       const employee = await ctx.db.get(row.employeeId);
       if (!employee) continue;
       const author = await ctx.db.get(row.adminId);
+      let conditionWeights: Record<string, number> = {};
+      if (employee.departmentId) {
+        const cached = conditionWeightsByDepartment.get(employee.departmentId);
+        if (cached) {
+          conditionWeights = cached;
+        } else {
+          const conditions = await ctx.db
+            .query("evaluationConditions")
+            .withIndex("by_department_active", (q) =>
+              q
+                .eq("departmentId", employee.departmentId!)
+                .eq("isActive", true)
+            )
+            .collect();
+          const totalWeight = conditions.reduce(
+            (sum, condition) =>
+              sum + Math.max(0, condition.weightPercent ?? 0),
+            0
+          );
+          conditionWeights = Object.fromEntries(
+            conditions.map((condition) => [
+              condition._id,
+              totalWeight > 0
+                ? (Math.max(0, condition.weightPercent ?? 0) / totalWeight) *
+                  100
+                : 100 / Math.max(1, conditions.length),
+            ])
+          );
+          conditionWeightsByDepartment.set(
+            employee.departmentId,
+            conditionWeights
+          );
+        }
+      }
       result.push({
         ...fullReport(row),
         employee: publicUser(employee),
         authorName: author?.name ?? "—",
+        conditionWeights,
       });
     }
     return result.sort((a, b) => {
@@ -344,17 +417,22 @@ export const confirm = mutation({
     ),
   },
   handler: async (ctx, args) => {
-    const admin = await requireAdmin(ctx, args.token);
+    const admin = await requireAdminPage(ctx, args.token, "admin-rapports");
     const report = await ctx.db.get(args.reportId);
     if (!report) throw new Error("Évaluation introuvable");
 
     const employee = await ctx.db.get(report.employeeId);
     if (!employee) throw new Error("Employé introuvable");
 
-    let scored = report.scores ?? [];
-    if (args.scores) {
-      scored = await buildScores(ctx, employee.departmentId, args.scores);
-    }
+    const scored = await buildScores(
+      ctx,
+      employee.departmentId,
+      args.scores ??
+        (report.scores ?? []).map(({ conditionId, points }) => ({
+          conditionId,
+          points,
+        }))
+    );
     if (!scored.length) {
       throw new Error("Évaluez au moins une condition (notes de 1 à 5)");
     }
@@ -403,7 +481,7 @@ export const reject = mutation({
     reportId: v.id("monthlyReports"),
   },
   handler: async (ctx, args) => {
-    await requireAdmin(ctx, args.token);
+    await requireAdminPage(ctx, args.token, "admin-rapports");
     const report = await ctx.db.get(args.reportId);
     if (!report) throw new Error("Évaluation introuvable");
     if (reportStatus(report) === "CONFIRME") {

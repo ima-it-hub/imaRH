@@ -14,7 +14,7 @@ export default function AdminDashboardPage() {
   const data = useQuery(api.dashboard.adminHome, token ? { token } : "skip");
 
   return (
-    <RequireAuth role="admin">
+    <RequireAuth page="admin-dashboard">
       <PageShell
         title="Tableau de bord RH"
         description="Indicateurs clés de l'effectif IMA Plomberie."

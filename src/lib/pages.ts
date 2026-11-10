@@ -22,7 +22,19 @@ export type PageKey =
   | "finances"
   | "caisse-paiements"
   | "rapports-mensuels"
-  | "mon-compte";
+  | "mon-compte"
+  | "admin-dashboard"
+  | "admin-employes"
+  | "admin-departements"
+  | "admin-scan"
+  | "admin-pointages"
+  | "admin-conges"
+  | "admin-salaires"
+  | "admin-primes"
+  | "admin-calcul-primes"
+  | "admin-ordres"
+  | "admin-rapports"
+  | "admin-parametres";
 
 /** Staff assigned to Finance / Finances department. */
 export function isFinanceDepartment(department?: string | null) {
@@ -173,13 +185,14 @@ export const ADMIN_PAGES: NavLink[] = [
   },
 ];
 
-/** Pages assignable in the permissions UI (cash payments are not a toggle). */
-export const APP_PAGES = EMPLOYEE_PAGES.filter(
-  (p) => p.pageKey !== "caisse-paiements"
-);
+/** Pages assignable in the permissions UI. */
+export const APP_PAGES = [
+  ...EMPLOYEE_PAGES.filter((page) => page.pageKey !== "caisse-paiements"),
+  ...ADMIN_PAGES,
+];
 
 export function getPageByKey(key: string) {
-  return EMPLOYEE_PAGES.find((page) => page.key === key);
+  return [...EMPLOYEE_PAGES, ...ADMIN_PAGES].find((page) => page.key === key);
 }
 
 export function canAccessPage(

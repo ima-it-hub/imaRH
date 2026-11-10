@@ -3,6 +3,7 @@
 import { FormEvent, useState } from "react";
 import { useMutation, useQuery } from "convex/react";
 import { api } from "../../../../../convex/_generated/api";
+import type { Id } from "../../../../../convex/_generated/dataModel";
 import { PageShell } from "@/components/PageShell";
 import { RequireAuth } from "@/components/RequireAuth";
 import {
@@ -37,6 +38,9 @@ export default function FinancesPage() {
     token ? { token } : "skip"
   );
   const requestPayment = useMutation(api.finances.requestPayment);
+  const confirmPaymentReceived = useMutation(
+    api.finances.confirmPaymentReceived
+  );
 
   const [tab, setTab] = useState<
     "salaires" | "primes" | "retards" | "paiements"
@@ -49,6 +53,7 @@ export default function FinancesPage() {
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
   const [busy, setBusy] = useState(false);
+  const [confirmingId, setConfirmingId] = useState<string | null>(null);
 
   const available = balance?.available ?? 0;
   const totalLateDeductions = balance?.totalLateDeductions ?? 0;
@@ -84,6 +89,22 @@ export default function FinancesPage() {
       setError(err instanceof Error ? err.message : "Erreur");
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function onConfirmReceipt(orderId: Id<"paymentOrders">) {
+    if (!token) return;
+    if (!window.confirm("Confirmez-vous avoir reçu ce paiement ?")) return;
+    setConfirmingId(orderId);
+    setError("");
+    setSuccess("");
+    try {
+      await confirmPaymentReceived({ token, orderId });
+      setSuccess("Réception du paiement confirmée");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Erreur");
+    } finally {
+      setConfirmingId(null);
     }
   }
 
@@ -339,10 +360,27 @@ export default function FinancesPage() {
                       <p className="text-xs text-zinc-500">
                         {formatDate(o.requestedAt)}
                       </p>
+                      {o.status === "A_CONFIRMER" && o.disbursedAt ? (
+                        <p className="text-xs text-amber-700">
+                          Remis le {formatDate(o.disbursedAt)}
+                        </p>
+                      ) : null}
                     </div>
                     <Badge className={statusBadgeClass(o.status)}>
                       {paymentStatusLabel(o.status)}
                     </Badge>
+                    {o.status === "A_CONFIRMER" ? (
+                      <PrimaryButton
+                        type="button"
+                        className="px-3 py-1.5 text-xs"
+                        disabled={confirmingId === o._id}
+                        onClick={() => void onConfirmReceipt(o._id)}
+                      >
+                        {confirmingId === o._id
+                          ? "Confirmation…"
+                          : "Confirmer la réception"}
+                      </PrimaryButton>
+                    ) : null}
                   </div>
                 ))}
                 {!orders?.length ? (

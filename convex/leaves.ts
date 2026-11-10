@@ -9,7 +9,7 @@ import {
   monthBounds,
   notify,
   publicUser,
-  requireAdmin,
+  requireAdminPage,
   requireUser,
   todayISO,
 } from "./lib";
@@ -237,7 +237,7 @@ export const request = mutation({
 export const pending = query({
   args: { token: v.string() },
   handler: async (ctx, args) => {
-    await requireAdmin(ctx, args.token);
+    await requireAdminPage(ctx, args.token, "admin-conges");
     const rows = await ctx.db
       .query("leaves")
       .withIndex("by_status", (q) => q.eq("status", "EN_ATTENTE"))
@@ -257,7 +257,7 @@ export const pending = query({
 export const toClose = query({
   args: { token: v.string() },
   handler: async (ctx, args) => {
-    await requireAdmin(ctx, args.token);
+    await requireAdminPage(ctx, args.token, "admin-conges");
     const rows = await ctx.db
       .query("leaves")
       .withIndex("by_status", (q) => q.eq("status", "APPROUVE"))
@@ -277,7 +277,7 @@ export const toClose = query({
 export const all = query({
   args: { token: v.string() },
   handler: async (ctx, args) => {
-    await requireAdmin(ctx, args.token);
+    await requireAdminPage(ctx, args.token, "admin-conges");
     const rows = await ctx.db.query("leaves").collect();
     const result = [];
     for (const row of rows) {
@@ -292,7 +292,7 @@ export const all = query({
 export const companyHalfDaySchedules = query({
   args: { token: v.string() },
   handler: async (ctx, args) => {
-    await requireAdmin(ctx, args.token);
+    await requireAdminPage(ctx, args.token, "admin-conges");
     return await ctx.db.query("companyHalfDaySchedules").collect();
   },
 });
@@ -316,7 +316,7 @@ export const requestForEmployee = mutation({
     autoApprove: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
-    await requireAdmin(ctx, args.token);
+    await requireAdminPage(ctx, args.token, "admin-conges");
     const employee = await ctx.db.get(args.employeeId);
     if (!employee || employee.role !== "employee" || employee.resignedAt) {
       throw new Error("Employé introuvable");
@@ -398,7 +398,7 @@ export const createCompanyLeave = mutation({
     leavingTime: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    await requireAdmin(ctx, args.token);
+    await requireAdminPage(ctx, args.token, "admin-conges");
     const name = args.name.trim();
     if (!name) throw new Error("Le nom du congé est obligatoire");
     if (!isValidISODate(args.startDate) || !isValidISODate(args.endDate)) {
@@ -548,7 +548,7 @@ export const updateCompanyLeave = mutation({
     leavingTime: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    await requireAdmin(ctx, args.token);
+    await requireAdminPage(ctx, args.token, "admin-conges");
     const name = args.name.trim();
     if (!name) throw new Error("Le nom du congé est obligatoire");
     if (!isValidISODate(args.startDate) || !isValidISODate(args.endDate)) {
@@ -748,7 +748,7 @@ export const decide = mutation({
     isPaid: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
-    await requireAdmin(ctx, args.token);
+    await requireAdminPage(ctx, args.token, "admin-conges");
     const leave = await ctx.db.get(args.leaveId);
     if (!leave) throw new Error("Demande introuvable");
     if (leave.status !== "EN_ATTENTE") {
@@ -825,7 +825,7 @@ export const recordActualDates = mutation({
     ),
   },
   handler: async (ctx, args) => {
-    await requireAdmin(ctx, args.token);
+    await requireAdminPage(ctx, args.token, "admin-conges");
     const leave = await ctx.db.get(args.leaveId);
     if (!leave) throw new Error("Demande introuvable");
     if (leave.status !== "APPROUVE" && leave.status !== "CLOTURE") {

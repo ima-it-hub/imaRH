@@ -69,11 +69,23 @@ export default function EmployeeReportsPage() {
   }, [conditions]);
 
   const previewPct = useMemo(() => {
-    const values = Object.values(scores);
-    if (!values.length) return 0;
-    const sum = values.reduce((a, b) => a + b, 0);
-    return Math.round((sum / (values.length * 5)) * 1000) / 10;
-  }, [scores]);
+    const scoredConditions = (conditions ?? []).filter(
+      (condition) => scores[condition._id] !== undefined
+    );
+    if (!scoredConditions.length) return 0;
+    const totalWeight = scoredConditions.reduce(
+      (sum, condition) => sum + (condition.weightPercent ?? 1),
+      0
+    );
+    if (totalWeight <= 0) return 0;
+    const weightedScore = scoredConditions.reduce(
+      (sum, condition) =>
+        sum +
+        scores[condition._id]! * (condition.weightPercent ?? 1),
+      0
+    );
+    return Math.round((weightedScore / (totalWeight * 5)) * 1000) / 10;
+  }, [conditions, scores]);
 
   const filtered = useMemo(() => {
     return (reports ?? []).filter((r) => {
@@ -200,24 +212,52 @@ export default function EmployeeReportsPage() {
                 ) : null}
 
                 {(conditions ?? []).map((c) => (
-                  <Field key={c._id} label={c.label}>
-                    <select
-                      className={inputClass}
-                      value={scores[c._id] ?? 3}
-                      onChange={(e) =>
-                        setScores((prev) => ({
-                          ...prev,
-                          [c._id]: Number(e.target.value),
-                        }))
-                      }
+                  <fieldset
+                    key={c._id}
+                    className="rounded-xl border border-zinc-200 p-4"
+                  >
+                    <legend className="px-1 text-sm font-semibold text-zinc-900">
+                      {c.label}
+                    </legend>
+                    {c.description ? (
+                      <p className="mb-3 text-sm leading-5 text-zinc-600">
+                        {c.description}
+                      </p>
+                    ) : null}
+                    <div
+                      className="flex flex-wrap gap-2"
+                      role="radiogroup"
+                      aria-label={`Note pour ${c.label}`}
                     >
                       {[1, 2, 3, 4, 5].map((n) => (
-                        <option key={n} value={n}>
-                          {n} / 5
-                        </option>
+                        <label
+                          key={n}
+                          className={`flex min-w-12 cursor-pointer items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-sm transition ${
+                            (scores[c._id] ?? 3) === n
+                              ? "border-[#0088E8] bg-[#0088E8]/10 font-semibold text-[#0074c7]"
+                              : "border-zinc-200 text-zinc-600 hover:bg-zinc-50"
+                          }`}
+                        >
+                          <input
+                            type="radio"
+                            name={`score-${c._id}`}
+                            value={n}
+                            checked={(scores[c._id] ?? 3) === n}
+                            onChange={() =>
+                              setScores((prev) => ({
+                                ...prev,
+                                [c._id]: n,
+                              }))
+                            }
+                            className="accent-[#0088E8]"
+                            aria-label={`${n} sur 5`}
+                          />
+                          <span>{n}</span>
+                        </label>
                       ))}
-                    </select>
-                  </Field>
+                    </div>
+                    <p className="mt-2 text-xs text-zinc-500">Note sur 5</p>
+                  </fieldset>
                 ))}
 
                 <Field label="Rapport pour l'admin">

@@ -4,7 +4,7 @@ import {
   isFinanceDepartment,
   monthBounds,
   publicUser,
-  requireAdmin,
+  requireAdminPage,
   requireUser,
   todayISO,
 } from "./lib";
@@ -87,8 +87,12 @@ export const employeeHome = query({
       lateMinutes,
       lastSalary,
       lastBonus: bonuses[0] ?? null,
-      recentLeaves: leaves.slice(0, 5),
-      recentPayments: payments.slice(0, 5),
+      recentLeaves: leaves
+        .filter((leave) => leave.status !== "CLOTURE")
+        .slice(0, 5),
+      recentPayments: payments
+        .filter((payment) => payment.status !== "PAYE")
+        .slice(0, 5),
       notifications,
     };
   },
@@ -97,7 +101,7 @@ export const employeeHome = query({
 export const adminHome = query({
   args: { token: v.string() },
   handler: async (ctx, args) => {
-    await requireAdmin(ctx, args.token);
+    await requireAdminPage(ctx, args.token, "admin-dashboard");
     const date = todayISO();
 
     const users = await ctx.db.query("users").collect();

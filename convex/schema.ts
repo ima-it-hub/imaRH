@@ -19,6 +19,8 @@ export default defineSchema({
     /** Display name kept in sync with workplaces.name */
     workplace: v.optional(v.string()),
     workplaceId: v.optional(v.id("workplaces")),
+    associatedAgentCode: v.optional(v.string()),
+    silwanCategoryCode: v.optional(v.string()),
     managerId: v.optional(v.id("users")),
     /** Legacy prime mode; new prime calculations use baseBonus for everyone. */
     bonusType: v.optional(
@@ -72,9 +74,9 @@ export default defineSchema({
     workingDaysPerMonth: v.optional(v.number()),
     /** Legacy prime weight; retained for stored settings compatibility. */
     primeObjectiveWeightPercent: v.optional(v.number()),
-    /** Legacy prime weight; the unified formula uses fixed 80/20 weights. */
+    /** Legacy prime weight retained for stored settings compatibility. */
     primeRecoveryWeightPercent: v.optional(v.number()),
-    /** Legacy prime weight; the unified formula uses fixed 80/20 weights. */
+    /** Legacy prime weight retained for stored settings compatibility. */
     primeEvaluationWeightPercent: v.optional(v.number()),
   }).index("by_key", ["key"]),
 
@@ -82,6 +84,7 @@ export default defineSchema({
   workplaces: defineTable({
     name: v.string(),
     description: v.optional(v.string()),
+    associatedAgentCode: v.optional(v.string()),
     workStartHour: v.optional(v.number()),
     workStartMinute: v.optional(v.number()),
     workEndHour: v.optional(v.number()),
@@ -98,6 +101,9 @@ export default defineSchema({
     name: v.string(),
     description: v.optional(v.string()),
     workplaceId: v.optional(v.id("workplaces")),
+    evaluationWeightPercent: v.optional(v.number()),
+    realisationWeightPercent: v.optional(v.number()),
+    companyRealisationWeightPercent: v.optional(v.number()),
     createdAt: v.number(),
   })
     .index("by_name", ["name"])
@@ -105,13 +111,22 @@ export default defineSchema({
 
   evaluationConditions: defineTable({
     departmentId: v.id("departments"),
+    libraryConditionId: v.optional(v.id("evaluationConditionLibrary")),
     label: v.string(),
     description: v.optional(v.string()),
     sortOrder: v.number(),
     isActive: v.boolean(),
+    weightPercent: v.optional(v.number()),
   })
     .index("by_department", ["departmentId"])
     .index("by_department_active", ["departmentId", "isActive"]),
+
+  evaluationConditionLibrary: defineTable({
+    label: v.string(),
+    description: v.optional(v.string()),
+    isActive: v.boolean(),
+    createdAt: v.number(),
+  }).index("by_label", ["label"]),
 
   attendances: defineTable({
     employeeId: v.id("users"),
@@ -291,12 +306,16 @@ export default defineSchema({
     status: v.union(
       v.literal("DEMANDE"),
       v.literal("VALIDE"),
+      v.literal("A_CONFIRMER"),
       v.literal("PAYE"),
       v.literal("REJETE")
     ),
     note: v.optional(v.string()),
     requestedAt: v.number(),
     treatedAt: v.optional(v.number()),
+    disbursedAt: v.optional(v.number()),
+    confirmedAt: v.optional(v.number()),
+    receiptReference: v.optional(v.string()),
   })
     .index("by_employee", ["employeeId"])
     .index("by_salary", ["salaryId"])
@@ -317,6 +336,7 @@ export default defineSchema({
           conditionId: v.id("evaluationConditions"),
           label: v.string(),
           points: v.number(),
+          weightPercent: v.optional(v.number()),
         })
       )
     ),
@@ -359,14 +379,18 @@ export default defineSchema({
     primeBase: v.number(),
     objectiveRatio: v.number(),
     objectiveAmount: v.number(),
+    companyRealisationRatio: v.optional(v.number()),
+    companyRealisationAmount: v.optional(v.number()),
     recoveryRatio: v.number(),
     recoveryAmount: v.number(),
     evaluationPercent: v.number(),
     evaluationAmount: v.number(),
     totalAmount: v.number(),
+    adminAdjustedAmount: v.optional(v.number()),
     objectiveWeightPercent: v.number(),
     recoveryWeightPercent: v.number(),
     evaluationWeightPercent: v.number(),
+    companyRealisationWeightPercent: v.optional(v.number()),
     employeeBonusPercent: v.number(),
     status: v.union(v.literal("BROUILLON"), v.literal("CONFIRME")),
     bonusId: v.optional(v.id("bonuses")),
@@ -393,6 +417,25 @@ export default defineSchema({
   })
     .index("by_period", ["year", "month"])
     .index("by_workplace_period", ["workplaceId", "year", "month"]),
+
+  silwanRealisationSyncs: defineTable({
+    ownerType: v.union(v.literal("employee"), v.literal("workplace")),
+    employeeId: v.optional(v.id("users")),
+    workplaceId: v.optional(v.id("workplaces")),
+    associatedAgentCode: v.optional(v.string()),
+    sourceType: v.optional(
+      v.union(v.literal("associated_agent"), v.literal("central_total"))
+    ),
+    month: v.number(),
+    year: v.number(),
+    realisation: v.number(),
+    recouvrement: v.optional(v.number()),
+    updatedAt: v.number(),
+    updatedBy: v.id("users"),
+  })
+    .index("by_employee_period", ["employeeId", "year", "month"])
+    .index("by_workplace_period", ["workplaceId", "year", "month"])
+    .index("by_period", ["year", "month"]),
 
   notifications: defineTable({
     userId: v.id("users"),

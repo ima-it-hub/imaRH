@@ -11,6 +11,7 @@ import {
   monthBounds,
   publicUser,
   requireAdmin,
+  requireAdminPage,
   requireUser,
   requiredMinutesForDate,
   todayISO,
@@ -460,7 +461,7 @@ export const myLateMinutesThisMonth = query({
 export const listByDate = query({
   args: { token: v.string(), date: v.string() },
   handler: async (ctx, args) => {
-    await requireAdmin(ctx, args.token);
+    await requireAdminPage(ctx, args.token, "admin-pointages");
     const rows = await ctx.db
       .query("attendances")
       .withIndex("by_date", (q) => q.eq("date", args.date))
@@ -499,7 +500,7 @@ export const adjustLateMinutes = mutation({
     lateMinutes: v.number(),
   },
   handler: async (ctx, args) => {
-    await requireAdmin(ctx, args.token);
+    await requireAdminPage(ctx, args.token, "admin-pointages");
     const row = await ctx.db.get(args.attendanceId);
     if (!row) throw new Error("Pointage introuvable");
 
@@ -533,7 +534,7 @@ export const monthlyLateDeductionsForAdmin = query({
     year: v.number(),
   },
   handler: async (ctx, args) => {
-    await requireAdmin(ctx, args.token);
+    await requireAdminPage(ctx, args.token, "admin-pointages");
     if (args.month < 1 || args.month > 12) {
       throw new Error("Mois invalide");
     }
@@ -606,7 +607,7 @@ export const approveMonthlyLateDeduction = mutation({
     amount: v.number(),
   },
   handler: async (ctx, args) => {
-    const admin = await requireAdmin(ctx, args.token);
+    const admin = await requireAdminPage(ctx, args.token, "admin-pointages");
     if (args.month < 1 || args.month > 12) {
       throw new Error("Mois invalide");
     }

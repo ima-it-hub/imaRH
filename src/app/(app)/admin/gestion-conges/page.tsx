@@ -356,7 +356,7 @@ export default function AdminCongesPage() {
   }
 
   return (
-    <RequireAuth role="admin">
+    <RequireAuth page="admin-conges">
       <PageShell
         title="Gestion des congés"
         description="Pour maladie : choisissez payé (aucun décompte) ou non payé (solde annuel puis salaire). Sans solde : déduit du salaire à la clôture."

@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useState } from "react";
 import { useMutation, useQuery } from "convex/react";
 import { api } from "../../../../../convex/_generated/api";
 import type { Id } from "../../../../../convex/_generated/dataModel";
@@ -10,6 +10,7 @@ import {
   Badge,
   Card,
   Field,
+  Modal,
   PrimaryButton,
   SecondaryButton,
   inputClass,
@@ -18,389 +19,369 @@ import { useAuth } from "@/lib/auth";
 
 export default function AdminDepartementsPage() {
   const { token } = useAuth();
-  const workplaces = useQuery(api.workplaces.list, token ? { token } : "skip");
-  const createWorkplace = useMutation(api.workplaces.create);
-  const updateWorkplace = useMutation(api.workplaces.update);
-  const removeWorkplace = useMutation(api.workplaces.remove);
-  const createDept = useMutation(api.departments.create);
-  const updateDept = useMutation(api.departments.update);
-  const removeDept = useMutation(api.departments.remove);
+  const departments = useQuery(
+    api.departments.list,
+    token ? { token } : "skip"
+  );
+  const createDepartment = useMutation(api.departments.create);
+  const updateDepartment = useMutation(api.departments.update);
+  const removeDepartment = useMutation(api.departments.remove);
   const addCondition = useMutation(api.departments.addCondition);
+  const conditionLibrary = useQuery(
+    api.departments.listConditionLibrary,
+    token ? { token } : "skip"
+  );
+  const createLibraryCondition = useMutation(
+    api.departments.createLibraryCondition
+  );
+  const updateLibraryCondition = useMutation(
+    api.departments.updateLibraryCondition
+  );
+  const deleteLibraryCondition = useMutation(
+    api.departments.deleteLibraryCondition
+  );
+  const prepareConditionLibrary = useMutation(
+    api.departments.prepareConditionLibrary
+  );
   const updateCondition = useMutation(api.departments.updateCondition);
   const removeCondition = useMutation(api.departments.removeCondition);
-  const migrateInvert = useMutation(api.departments.migrateWorkplaceOwnership);
-
-  const [wpName, setWpName] = useState("");
-  const [wpDescription, setWpDescription] = useState("");
-  const [selectedWpId, setSelectedWpId] = useState<Id<"workplaces"> | "">("");
-  const [editWpName, setEditWpName] = useState("");
-  const [editWpDescription, setEditWpDescription] = useState("");
-
-  const [deptName, setDeptName] = useState("");
-  const [deptDescription, setDeptDescription] = useState("");
-  const [selectedDeptId, setSelectedDeptId] = useState<Id<"departments"> | "">(
-    ""
+  const saveEvaluationSettings = useMutation(
+    api.departments.saveEvaluationSettings
   );
-  const [editDeptName, setEditDeptName] = useState("");
-  const [editDeptDescription, setEditDeptDescription] = useState("");
+
+  const [newName, setNewName] = useState("");
+  const [newDescription, setNewDescription] = useState("");
+  const [newDepartmentOpen, setNewDepartmentOpen] = useState(false);
+  const [selectedDepartmentId, setSelectedDepartmentId] =
+    useState<Id<"departments"> | null>(null);
+  const [editName, setEditName] = useState("");
+  const [editDescription, setEditDescription] = useState("");
   const [conditionLabel, setConditionLabel] = useState("");
+  const [conditionDescription, setConditionDescription] = useState("");
+  const [conditionLibraryDrafts, setConditionLibraryDrafts] = useState<
+    Record<string, { label: string; description: string }>
+  >({});
+  const [expandedLibraryConditionId, setExpandedLibraryConditionId] =
+    useState<Id<"evaluationConditionLibrary"> | null>(null);
+  const [conditionLibraryOpen, setConditionLibraryOpen] = useState(false);
+  const [selectedLibraryConditionId, setSelectedLibraryConditionId] =
+    useState<Id<"evaluationConditionLibrary"> | "">("");
   const [conditionDrafts, setConditionDrafts] = useState<
     Record<string, string>
   >({});
+  const [conditionWeightDrafts, setConditionWeightDrafts] = useState<
+    Record<string, string>
+  >({});
+  const [primeWeightDrafts, setPrimeWeightDrafts] = useState({
+    evaluation: "20",
+    realisation: "80",
+    companyRealisation: "0",
+  });
   const [msg, setMsg] = useState("");
   const [error, setError] = useState("");
 
-  const selectedWp = (workplaces ?? []).find((w) => w._id === selectedWpId);
-  const deptDetails = useQuery(
-    api.departments.listByWorkplace,
-    token && selectedWpId
-      ? { token, workplaceId: selectedWpId as Id<"workplaces"> }
-      : "skip"
-  );
-  const selectedDeptFull = (deptDetails ?? []).find(
-    (d) => d._id === selectedDeptId
+  const selectedDepartment = (departments ?? []).find(
+    (department) => department._id === selectedDepartmentId
   );
 
-  useEffect(() => {
-    if (!selectedWp) return;
-    setEditWpName(selectedWp.name);
-    setEditWpDescription(selectedWp.description ?? "");
-  }, [selectedWp]);
+  function selectDepartment(
+    department: NonNullable<typeof departments>[number]
+  ) {
+    setSelectedDepartmentId(department._id);
+    setEditName(department.name);
+    setEditDescription(department.description ?? "");
+    setConditionDrafts(
+      Object.fromEntries(
+        department.conditions.map((condition) => [
+          condition._id,
+          condition.label,
+        ])
+      )
+    );
+    setConditionWeightDrafts(
+      Object.fromEntries(
+        department.conditions.map((condition) => [
+          condition._id,
+          String(condition.weightPercent ?? 0),
+        ])
+      )
+    );
+    setPrimeWeightDrafts({
+      evaluation: String(department.evaluationWeightPercent ?? 20),
+      realisation: String(department.realisationWeightPercent ?? 80),
+      companyRealisation: String(
+        department.companyRealisationWeightPercent ?? 0
+      ),
+    });
+  }
 
-  useEffect(() => {
-    if (!selectedDeptFull) return;
-    setEditDeptName(selectedDeptFull.name);
-    setEditDeptDescription(selectedDeptFull.description ?? "");
-    const drafts: Record<string, string> = {};
-    for (const c of selectedDeptFull.conditions) {
-      drafts[c._id] = c.label;
-    }
-    setConditionDrafts(drafts);
-  }, [selectedDeptFull]);
-
-  async function onCreateWorkplace(e: FormEvent) {
-    e.preventDefault();
+  async function onCreateDepartment(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
     if (!token) return;
     setError("");
     setMsg("");
     try {
-      const row = await createWorkplace({
+      const department = await createDepartment({
         token,
-        name: wpName,
-        description: wpDescription,
+        name: newName,
+        description: newDescription,
       });
-      setWpName("");
-      setWpDescription("");
-      if (row) setSelectedWpId(row._id);
-      setMsg("Lieu de travail créé");
+      setNewName("");
+      setNewDescription("");
+      setNewDepartmentOpen(false);
+      if (department) {
+        setSelectedDepartmentId(department._id);
+        setEditName(department.name);
+        setEditDescription(department.description ?? "");
+        setConditionDrafts({});
+        setConditionWeightDrafts({});
+        setPrimeWeightDrafts({
+          evaluation: "20",
+          realisation: "80",
+          companyRealisation: "0",
+        });
+      }
+      setMsg("Département créé pour tous les lieux de travail");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Erreur");
     }
   }
 
-  async function onCreateDept(e: FormEvent) {
-    e.preventDefault();
-    if (!token || !selectedWpId) return;
+  async function onAddLibraryCondition(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!token) return;
     setError("");
     setMsg("");
     try {
-      const row = await createDept({
+      await createLibraryCondition({
         token,
-        workplaceId: selectedWpId,
-        name: deptName,
-        description: deptDescription,
+        label: conditionLabel,
+        description: conditionDescription,
       });
-      setDeptName("");
-      setDeptDescription("");
-      if (row) setSelectedDeptId(row._id);
-      setMsg("Département créé");
+      setConditionLabel("");
+      setConditionDescription("");
+      setMsg("Condition ajoutée à la bibliothèque");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Erreur");
     }
   }
 
-  async function onAddCondition(e: FormEvent) {
-    e.preventDefault();
-    if (!token || !selectedDeptId) return;
+  async function onSaveLibraryCondition(
+    conditionId: Id<"evaluationConditionLibrary">,
+    label: string,
+    description: string
+  ) {
+    if (!token) return;
     setError("");
+    setMsg("");
+    try {
+      await updateLibraryCondition({
+        token,
+        conditionId,
+        label,
+        description,
+      });
+      setConditionLibraryDrafts((previous) => {
+        const next = { ...previous };
+        delete next[conditionId];
+        return next;
+      });
+      setMsg("Condition mise à jour");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Erreur");
+    }
+  }
+
+  async function onDeleteLibraryCondition(
+    conditionId: Id<"evaluationConditionLibrary">,
+    label: string
+  ) {
+    if (
+      !token ||
+      !confirm(
+        `Retirer « ${label} » de la bibliothèque ? Les départements qui l'utilisent la conserveront.`
+      )
+    ) {
+      return;
+    }
+    setError("");
+    setMsg("");
+    try {
+      await deleteLibraryCondition({ token, conditionId });
+      setMsg("Condition retirée de la bibliothèque");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Erreur");
+    }
+  }
+
+  async function onAssignCondition() {
+    if (!token || !selectedDepartment || !selectedLibraryConditionId) return;
+    setError("");
+    setMsg("");
     try {
       await addCondition({
         token,
-        departmentId: selectedDeptId,
-        label: conditionLabel,
+        departmentId: selectedDepartment._id,
+        libraryConditionId: selectedLibraryConditionId,
       });
-      setConditionLabel("");
-      setMsg("Condition ajoutée");
+      setConditionWeightDrafts((previous) => ({
+        ...previous,
+        [selectedLibraryConditionId]: "0",
+      }));
+      setSelectedLibraryConditionId("");
+      setMsg("Condition ajoutée au département");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Erreur");
+    }
+  }
+
+  async function onOpenConditionLibrary() {
+    if (!token) return;
+    setError("");
+    try {
+      await prepareConditionLibrary({ token });
+      setConditionLibraryOpen(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Erreur");
+    }
+  }
+
+  async function onSaveDepartment() {
+    if (!token || !selectedDepartment) return;
+    setError("");
+    setMsg("");
+    try {
+      await updateDepartment({
+        token,
+        departmentId: selectedDepartment._id,
+        name: editName,
+        description: editDescription,
+      });
+      setMsg("Département mis à jour");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Erreur");
+    }
+  }
+
+  async function onSaveEvaluationSettings() {
+    if (!token || !selectedDepartment) return;
+    setError("");
+    setMsg("");
+    try {
+      await saveEvaluationSettings({
+        token,
+        departmentId: selectedDepartment._id,
+        evaluationWeightPercent: Number(primeWeightDrafts.evaluation),
+        realisationWeightPercent: Number(primeWeightDrafts.realisation),
+        companyRealisationWeightPercent: Number(
+          primeWeightDrafts.companyRealisation
+        ),
+        conditionWeights: selectedDepartment.conditions
+          .filter((condition) => condition.isActive)
+          .map((condition) => ({
+            conditionId: condition._id,
+            weightPercent: Number(conditionWeightDrafts[condition._id]),
+          })),
+      });
+      setMsg("Pondérations enregistrées");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Erreur");
     }
   }
 
   return (
-    <RequireAuth role="admin">
+    <RequireAuth page="admin-departements">
       <PageShell
-        title="Lieux & départements"
-        description="Créez d'abord un lieu de travail, puis assignez-y des départements et leurs critères d'évaluation."
+        title="Départements"
+        description="Les départements et leurs règles sont communs à tous les lieux de travail. Gérez les conditions d'évaluation et les parts de prime par département."
+        className="max-w-[1200px]"
       >
+        <div className="mb-4 flex flex-wrap gap-2">
+          <PrimaryButton
+            type="button"
+            onClick={() => setNewDepartmentOpen(true)}
+          >
+            Nouveau département
+          </PrimaryButton>
+          <SecondaryButton
+            type="button"
+            onClick={() => void onOpenConditionLibrary()}
+          >
+            Conditions d&apos;évaluation
+          </SecondaryButton>
+        </div>
         {error ? <p className="mb-3 text-sm text-red-600">{error}</p> : null}
         {msg ? <p className="mb-3 text-sm text-emerald-600">{msg}</p> : null}
 
-        <div className="mb-4">
-          <SecondaryButton
-            type="button"
-            onClick={async () => {
-              if (!token) return;
-              try {
-                const r = await migrateInvert({ token });
-                setMsg(
-                  `Migration : ${r.linked} dép. liés, ${r.copied} copiés, ${r.syncedUsers} employés alignés`
-                );
-              } catch (err) {
-                setError(err instanceof Error ? err.message : "Erreur");
-              }
-            }}
-          >
-            Migrer (départements → lieux)
-          </SecondaryButton>
-        </div>
-
-        <div className="grid gap-6 lg:grid-cols-[300px_300px_1fr]">
+        <div className="grid gap-6 lg:grid-cols-[320px_1fr]">
           <div className="space-y-4">
             <Card>
-              <h2 className="font-semibold text-zinc-900">Nouveau lieu</h2>
-              <form onSubmit={onCreateWorkplace} className="mt-3 space-y-3">
-                <Field label="Nom">
-                  <input
-                    required
-                    className={inputClass}
-                    value={wpName}
-                    onChange={(e) => setWpName(e.target.value)}
-                  />
-                </Field>
-                <Field label="Description">
-                  <input
-                    className={inputClass}
-                    value={wpDescription}
-                    onChange={(e) => setWpDescription(e.target.value)}
-                  />
-                </Field>
-                <PrimaryButton type="submit" className="w-full">
-                  Créer le lieu
-                </PrimaryButton>
-              </form>
-            </Card>
-
-            <Card>
-              <h2 className="mb-3 font-semibold text-zinc-900">Lieux</h2>
+              <h2 className="mb-3 font-semibold text-zinc-900">
+                Départements ({departments?.length ?? 0})
+              </h2>
               <div className="space-y-2">
-                {(workplaces ?? []).map((w) => (
+                {(departments ?? []).map((department) => (
                   <button
-                    key={w._id}
+                    key={department._id}
                     type="button"
-                    onClick={() => {
-                      setSelectedWpId(w._id);
-                      setSelectedDeptId("");
-                    }}
-                    className={`flex w-full items-center justify-between rounded-xl border px-3 py-2 text-left text-sm transition ${
-                      selectedWpId === w._id
+                    onClick={() => selectDepartment(department)}
+                    className={`flex w-full items-center justify-between gap-2 rounded-xl border px-3 py-2 text-left text-sm transition ${
+                      selectedDepartmentId === department._id
                         ? "border-[#0088E8]/40 bg-[#0088E8]/5"
                         : "border-zinc-200 hover:bg-zinc-50"
                     }`}
                   >
-                    <span className="font-medium text-zinc-900">{w.name}</span>
-                    <Badge className="bg-zinc-100 text-zinc-600">
-                      {w.departmentCount} dép. · {w.employeeCount} emp.
+                    <span className="font-medium text-zinc-900">
+                      {department.name}
+                    </span>
+                    <Badge className="shrink-0 bg-zinc-100 text-zinc-600">
+                      {department.employeeCount} emp.
                     </Badge>
                   </button>
                 ))}
-                {!workplaces?.length ? (
-                  <p className="text-sm text-zinc-500">Aucun lieu.</p>
+                {!departments?.length ? (
+                  <p className="text-sm text-zinc-500">
+                    Aucun département.
+                  </p>
                 ) : null}
               </div>
             </Card>
           </div>
 
-          <div className="space-y-4">
-            {selectedWp ? (
-              <>
-                <Card>
-                  <div className="mb-3 flex items-start justify-between gap-2">
-                    <h2 className="font-semibold text-zinc-900">
-                      {selectedWp.name}
-                    </h2>
-                    <SecondaryButton
-                      type="button"
-                      onClick={async () => {
-                        if (!token) return;
-                        if (
-                          !confirm(
-                            `Supprimer le lieu « ${selectedWp.name} » ?`
-                          )
-                        ) {
-                          return;
-                        }
-                        try {
-                          await removeWorkplace({
-                            token,
-                            workplaceId: selectedWp._id,
-                          });
-                          setSelectedWpId("");
-                          setSelectedDeptId("");
-                          setMsg("Lieu supprimé");
-                        } catch (err) {
-                          setError(
-                            err instanceof Error ? err.message : "Erreur"
-                          );
-                        }
-                      }}
-                    >
-                      Supprimer
-                    </SecondaryButton>
-                  </div>
-                  <div className="space-y-2">
-                    <Field label="Nom">
-                      <input
-                        className={inputClass}
-                        value={editWpName}
-                        onChange={(e) => setEditWpName(e.target.value)}
-                      />
-                    </Field>
-                    <Field label="Description">
-                      <input
-                        className={inputClass}
-                        value={editWpDescription}
-                        onChange={(e) => setEditWpDescription(e.target.value)}
-                      />
-                    </Field>
-                    <PrimaryButton
-                      type="button"
-                      onClick={async () => {
-                        if (!token) return;
-                        try {
-                          await updateWorkplace({
-                            token,
-                            workplaceId: selectedWp._id,
-                            name: editWpName,
-                            description: editWpDescription,
-                          });
-                          setMsg("Lieu mis à jour");
-                        } catch (err) {
-                          setError(
-                            err instanceof Error ? err.message : "Erreur"
-                          );
-                        }
-                      }}
-                    >
-                      Enregistrer le lieu
-                    </PrimaryButton>
-                  </div>
-                </Card>
-
-                <Card>
-                  <h2 className="font-semibold text-zinc-900">
-                    Nouveau département
-                  </h2>
-                  <form onSubmit={onCreateDept} className="mt-3 space-y-3">
-                    <Field label="Nom">
-                      <input
-                        required
-                        className={inputClass}
-                        value={deptName}
-                        onChange={(e) => setDeptName(e.target.value)}
-                      />
-                    </Field>
-                    <Field label="Description">
-                      <input
-                        className={inputClass}
-                        value={deptDescription}
-                        onChange={(e) => setDeptDescription(e.target.value)}
-                      />
-                    </Field>
-                    <PrimaryButton type="submit" className="w-full">
-                      Ajouter au lieu
-                    </PrimaryButton>
-                  </form>
-                </Card>
-
-                <Card>
-                  <h2 className="mb-3 font-semibold text-zinc-900">
-                    Départements
-                  </h2>
-                  <div className="space-y-2">
-                    {(deptDetails ?? selectedWp.departments ?? []).map((d) => (
-                      <button
-                        key={d._id}
-                        type="button"
-                        onClick={() => setSelectedDeptId(d._id)}
-                        className={`flex w-full items-center justify-between rounded-xl border px-3 py-2 text-left text-sm transition ${
-                          selectedDeptId === d._id
-                            ? "border-[#0088E8]/40 bg-[#0088E8]/5"
-                            : "border-zinc-200 hover:bg-zinc-50"
-                        }`}
-                      >
-                        <span className="font-medium text-zinc-900">
-                          {d.name}
-                        </span>
-                        <Badge className="bg-zinc-100 text-zinc-600">
-                          {"employeeCount" in d
-                            ? Number(d.employeeCount) || 0
-                            : 0}{" "}
-                          emp.
-                        </Badge>
-                      </button>
-                    ))}
-                    {!(deptDetails ?? selectedWp.departments ?? []).length ? (
-                      <p className="text-sm text-zinc-500">
-                        Aucun département sur ce lieu.
-                      </p>
-                    ) : null}
-                  </div>
-                </Card>
-              </>
-            ) : (
-              <Card>
-                <p className="text-sm text-zinc-500">
-                  Sélectionnez un lieu pour y ajouter des départements.
-                </p>
-              </Card>
-            )}
-          </div>
-
           <Card>
-            {selectedDeptFull ? (
-              <div className="space-y-6">
-                <div className="space-y-3">
+            {selectedDepartment ? (
+              <div className="space-y-7">
+                <section className="space-y-3">
                   <div className="flex flex-wrap items-start justify-between gap-3">
                     <div>
                       <h2 className="text-lg font-semibold text-zinc-900">
-                        {selectedDeptFull.name}
+                        {selectedDepartment.name}
                       </h2>
                       <p className="text-sm text-zinc-500">
-                        Lieu : {selectedWp?.name}
+                        Partagé par tous les lieux de travail
                       </p>
                     </div>
                     <SecondaryButton
                       type="button"
                       onClick={async () => {
-                        if (!token) return;
                         if (
+                          !token ||
                           !confirm(
-                            `Supprimer le département « ${selectedDeptFull.name} » ?`
+                            `Supprimer le département « ${selectedDepartment.name} » ?`
                           )
                         ) {
                           return;
                         }
+                        setError("");
                         try {
-                          await removeDept({
+                          await removeDepartment({
                             token,
-                            departmentId: selectedDeptFull._id,
+                            departmentId: selectedDepartment._id,
                           });
-                          setSelectedDeptId("");
+                          setSelectedDepartmentId(null);
                           setMsg("Département supprimé");
                         } catch (err) {
-                          setError(
-                            err instanceof Error ? err.message : "Erreur"
-                          );
+                          setError(err instanceof Error ? err.message : "Erreur");
                         }
                       }}
                     >
@@ -411,100 +392,181 @@ export default function AdminDepartementsPage() {
                     <input
                       required
                       className={inputClass}
-                      value={editDeptName}
-                      onChange={(e) => setEditDeptName(e.target.value)}
+                      value={editName}
+                      onChange={(event) => setEditName(event.target.value)}
                     />
                   </Field>
                   <Field label="Description">
                     <input
                       className={inputClass}
-                      value={editDeptDescription}
-                      onChange={(e) => setEditDeptDescription(e.target.value)}
+                      value={editDescription}
+                      onChange={(event) =>
+                        setEditDescription(event.target.value)
+                      }
                     />
                   </Field>
-                  <PrimaryButton
-                    type="button"
-                    onClick={async () => {
-                      if (!token) return;
-                      try {
-                        await updateDept({
-                          token,
-                          departmentId: selectedDeptFull._id,
-                          name: editDeptName,
-                          description: editDeptDescription,
-                          workplaceId: selectedWpId
-                            ? (selectedWpId as Id<"workplaces">)
-                            : undefined,
-                        });
-                        setMsg("Département mis à jour");
-                      } catch (err) {
-                        setError(err instanceof Error ? err.message : "Erreur");
-                      }
-                    }}
-                  >
+                  <PrimaryButton type="button" onClick={() => void onSaveDepartment()}>
                     Enregistrer le département
                   </PrimaryButton>
-                </div>
+                </section>
 
-                <div>
+                <section>
+                  <h3 className="mb-2 font-semibold text-zinc-900">
+                    Répartition de la prime
+                  </h3>
+                  <p className="mb-3 text-sm text-zinc-500">
+                    Les trois parts doivent totaliser 100 %. La part entreprise
+                    utilise la réalisation de BEN ZARGA par rapport à son
+                    objectif mensuel. L&apos;ajustement de recouvrement reste
+                    appliqué séparément.
+                  </p>
+                  <div className="grid gap-3 sm:grid-cols-3">
+                    {(
+                      [
+                        ["evaluation", "Évaluation (%)"],
+                        ["realisation", "Réalisation personnelle (%)"],
+                        ["companyRealisation", "Réalisation entreprise (%)"],
+                      ] as const
+                    ).map(([key, label]) => (
+                      <Field key={key} label={label}>
+                        <input
+                          type="number"
+                          min="0"
+                          max="100"
+                          step="0.01"
+                          className={inputClass}
+                          value={primeWeightDrafts[key]}
+                          onChange={(event) =>
+                            setPrimeWeightDrafts((previous) => ({
+                              ...previous,
+                              [key]: event.target.value,
+                            }))
+                          }
+                        />
+                      </Field>
+                    ))}
+                  </div>
+                </section>
+
+                <section>
                   <h3 className="mb-2 font-semibold text-zinc-900">
                     Conditions d&apos;évaluation
                   </h3>
                   <p className="mb-3 text-sm text-zinc-500">
-                    Le manager note chaque condition de 1 à 5. Le pourcentage =
-                    moyenne des notes ÷ 5.
+                    Le manager note chaque condition de 1 à 5. Les poids actifs
+                    doivent totaliser 100 %.
                   </p>
-
-                  <form
-                    onSubmit={onAddCondition}
-                    className="mb-4 flex flex-wrap gap-2"
-                  >
-                    <input
-                      required
+                  <div className="mb-4 flex flex-wrap gap-2">
+                    <select
                       className={inputClass + " min-w-[220px] flex-1"}
-                      placeholder="Nouvelle condition…"
-                      value={conditionLabel}
-                      onChange={(e) => setConditionLabel(e.target.value)}
-                    />
-                    <PrimaryButton type="submit">Ajouter</PrimaryButton>
-                  </form>
+                      value={selectedLibraryConditionId}
+                      onChange={(event) =>
+                        setSelectedLibraryConditionId(
+                          event.target.value as
+                            | Id<"evaluationConditionLibrary">
+                            | ""
+                        )
+                      }
+                    >
+                      <option value="">Choisir une condition existante…</option>
+                      {(conditionLibrary ?? [])
+                        .filter(
+                          (libraryCondition) =>
+                            !selectedDepartment.conditions.some(
+                              (condition) =>
+                                condition.libraryConditionId ===
+                                libraryCondition._id
+                            )
+                        )
+                        .map((condition) => (
+                          <option key={condition._id} value={condition._id}>
+                            {condition.label}
+                          </option>
+                        ))}
+                    </select>
+                    <PrimaryButton
+                      type="button"
+                      disabled={!selectedLibraryConditionId}
+                      onClick={() => void onAssignCondition()}
+                    >
+                      Ajouter au département
+                    </PrimaryButton>
+                    <SecondaryButton
+                      type="button"
+                      onClick={() => void onOpenConditionLibrary()}
+                    >
+                      Nouvelle condition
+                    </SecondaryButton>
+                  </div>
 
                   <div className="space-y-2">
-                    {selectedDeptFull.conditions.map((c) => (
+                    {selectedDepartment.conditions.map((condition) => (
                       <div
-                        key={c._id}
+                        key={condition._id}
                         className="flex flex-wrap items-center gap-2 rounded-xl border border-zinc-200 px-3 py-2"
                       >
                         <input
                           className={inputClass + " min-w-[180px] flex-1"}
-                          value={conditionDrafts[c._id] ?? c.label}
-                          onChange={(e) =>
-                            setConditionDrafts((prev) => ({
-                              ...prev,
-                              [c._id]: e.target.value,
+                          value={
+                            conditionDrafts[condition._id] ?? condition.label
+                          }
+                          onChange={(event) =>
+                            setConditionDrafts((previous) => ({
+                              ...previous,
+                              [condition._id]: event.target.value,
                             }))
                           }
                         />
+                        {condition.isActive ? (
+                          <label className="flex items-center gap-2 text-sm text-zinc-600">
+                            Poids %
+                            <input
+                              type="number"
+                              min="0"
+                              max="100"
+                              step="0.01"
+                              className={inputClass + " w-24"}
+                              value={
+                                conditionWeightDrafts[condition._id] ?? ""
+                              }
+                              onChange={(event) =>
+                                setConditionWeightDrafts((previous) => ({
+                                  ...previous,
+                                  [condition._id]: event.target.value,
+                                }))
+                              }
+                            />
+                          </label>
+                        ) : null}
                         <Badge
                           className={
-                            c.isActive
+                            condition.isActive
                               ? "bg-emerald-50 text-emerald-700"
                               : "bg-zinc-100 text-zinc-500"
                           }
                         >
-                          {c.isActive ? "active" : "inactive"}
+                          {condition.isActive ? "active" : "inactive"}
                         </Badge>
                         <SecondaryButton
                           type="button"
                           onClick={async () => {
                             if (!token) return;
-                            await updateCondition({
-                              token,
-                              conditionId: c._id,
-                              label: conditionDrafts[c._id] ?? c.label,
-                              isActive: c.isActive,
-                            });
-                            setMsg("Condition mise à jour");
+                            setError("");
+                            try {
+                              await updateCondition({
+                                token,
+                                conditionId: condition._id,
+                                label:
+                                  conditionDrafts[condition._id] ??
+                                  condition.label,
+                                isActive: condition.isActive,
+                              });
+                              setMsg("Condition mise à jour");
+                            } catch (err) {
+                              setError(
+                                err instanceof Error ? err.message : "Erreur"
+                              );
+                            }
                           }}
                         >
                           Sauver
@@ -513,49 +575,271 @@ export default function AdminDepartementsPage() {
                           type="button"
                           onClick={async () => {
                             if (!token) return;
-                            await updateCondition({
-                              token,
-                              conditionId: c._id,
-                              label: conditionDrafts[c._id] ?? c.label,
-                              isActive: !c.isActive,
-                            });
+                            setError("");
+                            try {
+                              await updateCondition({
+                                token,
+                                conditionId: condition._id,
+                                label:
+                                  conditionDrafts[condition._id] ??
+                                  condition.label,
+                                isActive: !condition.isActive,
+                              });
+                              setMsg(
+                                condition.isActive
+                                  ? "Condition désactivée"
+                                  : "Condition activée"
+                              );
+                            } catch (err) {
+                              setError(
+                                err instanceof Error ? err.message : "Erreur"
+                              );
+                            }
                           }}
                         >
-                          {c.isActive ? "Désactiver" : "Activer"}
+                          {condition.isActive ? "Désactiver" : "Activer"}
                         </SecondaryButton>
                         <SecondaryButton
                           type="button"
                           onClick={async () => {
-                            if (!token) return;
-                            if (!confirm("Supprimer cette condition ?")) return;
-                            await removeCondition({
-                              token,
-                              conditionId: c._id,
-                            });
+                            if (
+                              !token ||
+                              !confirm("Supprimer cette condition ?")
+                            ) {
+                              return;
+                            }
+                            setError("");
+                            try {
+                              await removeCondition({
+                                token,
+                                conditionId: condition._id,
+                              });
+                              setMsg("Condition supprimée");
+                            } catch (err) {
+                              setError(
+                                err instanceof Error ? err.message : "Erreur"
+                              );
+                            }
                           }}
                         >
                           ×
                         </SecondaryButton>
                       </div>
                     ))}
-                    {!selectedDeptFull.conditions.length ? (
+                    {!selectedDepartment.conditions.length ? (
                       <p className="text-sm text-zinc-500">
                         Aucune condition. Ajoutez les critères que les managers
                         noteront.
                       </p>
                     ) : null}
                   </div>
-                </div>
+                  <PrimaryButton
+                    type="button"
+                    className="mt-4"
+                    onClick={() => void onSaveEvaluationSettings()}
+                  >
+                    Enregistrer les pondérations
+                  </PrimaryButton>
+                </section>
               </div>
             ) : (
               <p className="text-sm text-zinc-500">
-                {selectedWp
-                  ? "Sélectionnez un département pour gérer ses conditions."
-                  : "Sélectionnez un lieu, puis un département."}
+                Sélectionnez un département pour modifier ses conditions et ses
+                pondérations.
               </p>
             )}
           </Card>
         </div>
+
+        <Modal
+          open={newDepartmentOpen}
+          onClose={() => setNewDepartmentOpen(false)}
+          title="Nouveau département"
+        >
+          <form onSubmit={onCreateDepartment} className="space-y-3">
+            <Field label="Nom">
+              <input
+                required
+                className={inputClass}
+                value={newName}
+                onChange={(event) => setNewName(event.target.value)}
+              />
+            </Field>
+            <Field label="Description">
+              <input
+                className={inputClass}
+                value={newDescription}
+                onChange={(event) => setNewDescription(event.target.value)}
+              />
+            </Field>
+            <PrimaryButton type="submit" className="w-full">
+              Créer le département
+            </PrimaryButton>
+          </form>
+        </Modal>
+
+        <Modal
+          open={conditionLibraryOpen}
+          onClose={() => setConditionLibraryOpen(false)}
+          title="Conditions d'évaluation"
+        >
+          <form onSubmit={onAddLibraryCondition} className="space-y-3">
+            <Field label="Nom de la condition">
+              <input
+                required
+                className={inputClass}
+                value={conditionLabel}
+                onChange={(event) => setConditionLabel(event.target.value)}
+                placeholder="Ex. Ponctualité & assiduité"
+              />
+            </Field>
+            <Field label="Description (facultative)">
+              <textarea
+                rows={3}
+                className={inputClass}
+                value={conditionDescription}
+                onChange={(event) =>
+                  setConditionDescription(event.target.value)
+                }
+              />
+            </Field>
+            <PrimaryButton type="submit" className="w-full">
+              Ajouter à la bibliothèque
+            </PrimaryButton>
+          </form>
+          {error ? (
+            <p className="mt-3 text-sm text-red-600">{error}</p>
+          ) : null}
+          {msg ? (
+            <p className="mt-3 text-sm text-emerald-600">{msg}</p>
+          ) : null}
+          <div className="mt-5">
+            <h3 className="mb-2 text-sm font-semibold text-zinc-900">
+              Conditions existantes
+            </h3>
+            <div className="max-h-[45vh] space-y-2 overflow-y-auto">
+              {(conditionLibrary ?? []).map((condition) => (
+                <div
+                  key={condition._id}
+                  className="rounded-xl border border-zinc-200"
+                >
+                  <button
+                    type="button"
+                    aria-expanded={
+                      expandedLibraryConditionId === condition._id
+                    }
+                    onClick={() =>
+                      setExpandedLibraryConditionId((current) =>
+                        current === condition._id ? null : condition._id
+                      )
+                    }
+                    className="flex w-full items-center justify-between gap-3 px-3 py-2.5 text-left"
+                  >
+                    <span className="min-w-0">
+                      <span className="block truncate text-sm font-medium text-zinc-900">
+                        {condition.label}
+                      </span>
+                      {condition.description ? (
+                        <span className="mt-0.5 block truncate text-xs text-zinc-500">
+                          {condition.description}
+                        </span>
+                      ) : null}
+                    </span>
+                    <span
+                      aria-hidden="true"
+                      className="shrink-0 text-zinc-500"
+                    >
+                      {expandedLibraryConditionId === condition._id ? "−" : "+"}
+                    </span>
+                  </button>
+                  {expandedLibraryConditionId === condition._id ? (
+                    <div className="space-y-2 border-t border-zinc-100 p-3">
+                      <Field label="Nom">
+                        <input
+                          required
+                          className={inputClass}
+                          value={
+                            conditionLibraryDrafts[condition._id]?.label ??
+                            condition.label
+                          }
+                          onChange={(event) =>
+                            setConditionLibraryDrafts((previous) => ({
+                              ...previous,
+                              [condition._id]: {
+                                label: event.target.value,
+                                description:
+                                  previous[condition._id]?.description ??
+                                  condition.description ??
+                                  "",
+                              },
+                            }))
+                          }
+                        />
+                      </Field>
+                      <Field label="Description (facultative)">
+                        <textarea
+                          rows={2}
+                          className={inputClass}
+                          value={
+                            conditionLibraryDrafts[condition._id]
+                              ?.description ??
+                            condition.description ??
+                            ""
+                          }
+                          onChange={(event) =>
+                            setConditionLibraryDrafts((previous) => ({
+                              ...previous,
+                              [condition._id]: {
+                                label:
+                                  previous[condition._id]?.label ??
+                                  condition.label,
+                                description: event.target.value,
+                              },
+                            }))
+                          }
+                        />
+                      </Field>
+                      <div className="flex flex-wrap gap-2">
+                        <PrimaryButton
+                          type="button"
+                          onClick={() =>
+                            void onSaveLibraryCondition(
+                              condition._id,
+                              conditionLibraryDrafts[condition._id]?.label ??
+                                condition.label,
+                              conditionLibraryDrafts[condition._id]
+                                ?.description ??
+                                condition.description ??
+                                ""
+                            )
+                          }
+                        >
+                          Enregistrer
+                        </PrimaryButton>
+                        <SecondaryButton
+                          type="button"
+                          onClick={() =>
+                            void onDeleteLibraryCondition(
+                              condition._id,
+                              condition.label
+                            )
+                          }
+                        >
+                          Supprimer
+                        </SecondaryButton>
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              ))}
+              {!conditionLibrary?.length ? (
+                <p className="text-sm text-zinc-500">
+                  Aucune condition dans la bibliothèque.
+                </p>
+              ) : null}
+            </div>
+          </div>
+        </Modal>
       </PageShell>
     </RequireAuth>
   );

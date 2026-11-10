@@ -25,6 +25,22 @@ type WorkplacePrimeDraft = {
   recouvrement: string;
 };
 
+type SilwanRealisationResult = {
+  key: string;
+  code: string;
+  matched: boolean;
+  totalRealisation: number;
+  totalRecouvrement: number;
+};
+
+function isCentralWorkplace(name: string) {
+  return name.trim().toLocaleUpperCase("fr-DZ") === "BEN ZARGA";
+}
+
+function formatRealisation(value: number) {
+  return (Math.round(value * 100) / 100).toFixed(2);
+}
+
 export default function AdminCalculPrimesPage() {
   const { token } = useAuth();
   const now = new Date();
@@ -38,6 +54,7 @@ export default function AdminCalculPrimesPage() {
   >({});
   const [employeeToAdd, setEmployeeToAdd] = useState("");
   const [busy, setBusy] = useState(false);
+  const [silwanBusy, setSilwanBusy] = useState(false);
   const [msg, setMsg] = useState("");
   const [error, setError] = useState("");
 
@@ -50,20 +67,30 @@ export default function AdminCalculPrimesPage() {
     token ? { token, month, year } : "skip"
   );
   const saveDrafts = useMutation(api.primeCalculations.saveDrafts);
+  const saveSilwanRealisations = useMutation(
+    api.primeCalculations.saveSilwanRealisations
+  );
 
   const drafts = useMemo(() => {
     const result: Record<string, PrimeDraft> = {};
     for (const row of rows ?? []) {
       const calc = row.calculation;
       result[row.employee._id] = {
-        selected: calc?.calculationVersion === 2 && calc.hasOwnMetrics === true,
+        selected:
+          (calc?.calculationVersion === 2 && calc.hasOwnMetrics === true) ||
+          row.silwanRealisation !== null,
         objective:
           calc?.calculationVersion === 2
             ? String(calc.objective)
             : row.previousMonthObjective !== null
               ? String(row.previousMonthObjective)
               : "",
-        realisation: calc?.realisation ? String(calc.realisation) : "",
+        realisation:
+          row.silwanRealisation !== null
+            ? formatRealisation(row.silwanRealisation)
+            : calc?.realisation !== undefined
+              ? formatRealisation(calc.realisation)
+              : "",
         recoveryObjective:
           calc?.recoveryObjective !== undefined
             ? String(calc.recoveryObjective)
@@ -71,7 +98,11 @@ export default function AdminCalculPrimesPage() {
               ? String(row.previousMonthRecoveryObjective)
               : "",
         recouvrement:
-          calc?.recouvrement !== undefined ? String(calc.recouvrement) : "",
+          row.silwanRecouvrement !== null
+            ? formatRealisation(row.silwanRecouvrement)
+            : calc?.recouvrement !== undefined
+              ? formatRealisation(calc.recouvrement)
+              : "",
         ...draftOverrides[row.employee._id],
       };
     }
@@ -88,7 +119,12 @@ export default function AdminCalculPrimesPage() {
           : row.previousMonthObjective !== null
             ? String(row.previousMonthObjective)
             : "",
-        realisation: metric ? String(metric.realisation) : "",
+        realisation:
+          row.silwanRealisation !== null
+            ? formatRealisation(row.silwanRealisation)
+            : metric
+              ? formatRealisation(metric.realisation)
+              : "",
         recoveryObjective:
           metric?.recoveryObjective !== undefined
             ? String(metric.recoveryObjective)
@@ -96,9 +132,11 @@ export default function AdminCalculPrimesPage() {
               ? String(row.previousMonthRecoveryObjective)
               : "",
         recouvrement:
-          metric?.recouvrement !== undefined
-            ? String(metric.recouvrement)
-            : "",
+          row.silwanRecouvrement !== null
+            ? formatRealisation(row.silwanRecouvrement)
+            : metric?.recouvrement !== undefined
+              ? formatRealisation(metric.recouvrement)
+              : "",
         ...workplaceOverrides[row.workplace._id],
       };
     }
@@ -181,6 +219,167 @@ export default function AdminCalculPrimesPage() {
     }));
   }
 
+  async function importSilwanRealisations() {
+    if (!token || !rows || !workplaceRows) return;
+    const workplaceEntries = workplaceRows.flatMap(({ workplace }) => {
+      if (isCentralWorkplace(workplace.name)) {
+        return [
+          {
+            key: `workplace:${workplace._id}`,
+            code: "",
+            allDocuments: true,
+            kind: "workplace" as const,
+            workplaceId: workplace._id,
+          },
+        ];
+      }
+      return workplace.associatedAgentCode?.trim()
+        ? [
+            {
+              key: `workplace:${workplace._id}`,
+              code: workplace.associatedAgentCode,
+              allDocuments: false,
+              kind: "workplace" as const,
+              workplaceId: workplace._id,
+            },
+          ]
+        : [];
+    });
+    const entries = [
+      ...workplaceEntries,
+      ...rows.flatMap(({ employee }) =>
+        employee.role === "employee" &&
+        employee.baseBonus > 0 &&
+        employee.associatedAgentCode?.trim()
+          ? [
+              {
+                key: `employee:${employee._id}`,
+                code: employee.associatedAgentCode,
+                allDocuments: false,
+                kind: "employee" as const,
+                employeeId: employee._id,
+              },
+            ]
+          : []
+      ),
+    ];
+    if (!entries.length) {
+      setError(
+        "Aucun code AssociatedAgent n'est défini sur les fiches employé ou lieu de travail."
+      );
+      return;
+    }
+
+    setSilwanBusy(true);
+    setError("");
+    setMsg("");
+    try {
+      const response = await fetch("/api/silwan/realisation", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          token,
+          month,
+          year,
+          entries: entries.map(({ key, code, allDocuments }) => ({
+            key,
+            code,
+            allDocuments,
+          })),
+        }),
+      });
+      const payload = (await response.json()) as {
+        error?: string;
+        results?: SilwanRealisationResult[];
+      };
+      if (!response.ok || !payload.results) {
+        throw new Error(
+          payload.error ?? "Impossible d'importer les réalisations Silwan."
+        );
+      }
+      const results = payload.results;
+      const requestByKey = new Map(entries.map((entry) => [entry.key, entry]));
+      const matchedResults = results.filter((result) => result.matched);
+      await saveSilwanRealisations({
+        token,
+        month,
+        year,
+        employeeEntries: matchedResults.flatMap((result) => {
+          const requestEntry = requestByKey.get(result.key);
+          if (!requestEntry || requestEntry.kind !== "employee") return [];
+          return [
+            {
+              employeeId: requestEntry.employeeId,
+              associatedAgentCode: requestEntry.code,
+              realisation: Number(formatRealisation(result.totalRealisation)),
+              recouvrement: Number(formatRealisation(result.totalRecouvrement)),
+            },
+          ];
+        }),
+        workplaceEntries: matchedResults.flatMap((result) => {
+          const requestEntry = requestByKey.get(result.key);
+          if (!requestEntry || requestEntry.kind !== "workplace") return [];
+          return [
+            {
+              workplaceId: requestEntry.workplaceId,
+              associatedAgentCode: requestEntry.allDocuments
+                ? undefined
+                : requestEntry.code,
+              allDocuments: requestEntry.allDocuments,
+              realisation: Number(formatRealisation(result.totalRealisation)),
+              recouvrement: Number(formatRealisation(result.totalRecouvrement)),
+            },
+          ];
+        }),
+      });
+
+      setWorkplaceOverrides((previous) => {
+        const next = { ...previous };
+        for (const result of results) {
+          if (!result.matched || !result.key.startsWith("workplace:")) continue;
+          const workplaceId = result.key.slice("workplace:".length);
+          const draft = workplaceDrafts[workplaceId];
+          if (draft) {
+            next[workplaceId] = {
+              ...draft,
+              ...previous[workplaceId],
+              realisation: formatRealisation(result.totalRealisation),
+              recouvrement: formatRealisation(result.totalRecouvrement),
+            };
+          }
+        }
+        return next;
+      });
+      setDraftOverrides((previous) => {
+        const next = { ...previous };
+        for (const result of results) {
+          if (!result.matched || !result.key.startsWith("employee:")) continue;
+          const employeeId = result.key.slice("employee:".length);
+          const draft = drafts[employeeId];
+          if (draft) {
+            next[employeeId] = {
+              ...draft,
+              ...previous[employeeId],
+              selected: true,
+              realisation: formatRealisation(result.totalRealisation),
+              recouvrement: formatRealisation(result.totalRecouvrement),
+            };
+          }
+        }
+        return next;
+      });
+
+      const matchedCount = matchedResults.length;
+      setMsg(
+        `${matchedCount} réalisation(s) et recouvrement(s) importé(s) et enregistré(s) pour ${month}/${year}. Enregistrez les données pour recalculer les primes; une nouvelle synchronisation ne sera pas nécessaire.`
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Erreur d'importation Silwan");
+    } finally {
+      setSilwanBusy(false);
+    }
+  }
+
   async function onSave() {
     if (!token || !rows || !workplaceRows) return;
     const selectedRows = rows.filter(
@@ -240,7 +439,7 @@ export default function AdminCalculPrimesPage() {
   }
 
   return (
-    <RequireAuth role="admin">
+    <RequireAuth page="admin-calcul-primes">
       <PageShell
         title="Calcul des primes"
         description="Saisissez les résultats par lieu de travail et ajoutez uniquement les employés qui ont des objectifs individuels. Les autres utilisent les données de leur lieu ou, si elles manquent, celles de leur manager."
@@ -283,16 +482,13 @@ export default function AdminCalculPrimesPage() {
               }}
             />
           </Field>
-          {/* <p className="pb-2 text-xs text-zinc-500">
-            Prime = 80% × réalisation / objectif + 20% × évaluation. En calcul
-            individuel, le recouvrement ajuste la prime : écart à 100% × 50% de
-            la base sous 50%, écart × 25% de 50% à 100%, puis les dépassements
-            ajoutent 25% jusqu&apos;à 150% et 50% jusqu&apos;à 200%. Par défaut,
-            l&apos;objectif de recouvrement reprend la réalisation du mois précédent,
-            ajustée de l&apos;écart entre l&apos;objectif de recouvrement et le
-            recouvrement réellement obtenu ce mois-là. L&apos;objectif de
-            réalisation reprend l&apos;objectif du mois précédent.
-          </p> */}
+          <PrimaryButton
+            type="button"
+            disabled={silwanBusy || !rows || !workplaceRows}
+            onClick={() => void importSilwanRealisations()}
+          >
+            {silwanBusy ? "Import Silwan…" : "Importer depuis Silwan"}
+          </PrimaryButton>
         </div>
 
         <Card>
@@ -364,7 +560,14 @@ export default function AdminCalculPrimesPage() {
                               </span>
                               <input
                                 type="number"
-                                min={field === "objective" || field === "recoveryObjective" ? 1 : 0}
+                                min={
+                                  field === "objective" ||
+                                  field === "recoveryObjective"
+                                    ? 1
+                                    : field === "realisation"
+                                      ? 0
+                                      : undefined
+                                }
                                 step="0.01"
                                 className="w-full min-w-0 rounded-lg border border-zinc-200 px-2 py-2 tabular-nums"
                                 value={draft[field]}
@@ -539,7 +742,14 @@ export default function AdminCalculPrimesPage() {
                               <span className="sr-only">{label}</span>
                               <input
                                 type="number"
-                                min={field === "objective" || field === "recoveryObjective" ? 1 : 0}
+                                min={
+                                  field === "objective" ||
+                                  field === "recoveryObjective"
+                                    ? 1
+                                    : field === "realisation"
+                                      ? 0
+                                      : undefined
+                                }
                                 step="0.01"
                                 className="w-full min-w-0 rounded-lg border border-zinc-200 px-2 py-2 tabular-nums"
                                 value={draft[field]}

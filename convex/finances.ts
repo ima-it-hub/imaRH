@@ -8,6 +8,7 @@ import {
   prorateMonthlySalary,
   publicUser,
   requireAdmin,
+  requireAdminPage,
   requireUser,
   todayISO,
 } from "./lib";
@@ -89,9 +90,11 @@ async function computeBalance(ctx: QueryCtx | MutationCtx, employeeId: Id<"users
   const totalCredits =
     totalSalaries + availableBonuses - totalLateDeductions;
 
-  // Pending, validated and paid requests reduce the available balance
+  // Pending, validated, disbursed and paid requests reduce the available balance
   const reservedOrPaid = orders
-    .filter((o) => o.status === "DEMANDE" || o.status === "VALIDE" || o.status === "PAYE")
+    .filter((o) =>
+      ["DEMANDE", "VALIDE", "A_CONFIRMER", "PAYE"].includes(o.status)
+    )
     .reduce((sum, o) => sum + o.amount, 0);
 
   const available = Math.max(0, totalCredits - reservedOrPaid);
@@ -243,11 +246,11 @@ export const requestPaymentForEmployee = mutation({
     ),
     amount: v.number(),
     note: v.optional(v.string()),
-    /** If true, mark as VALIDE immediately (ready for Finance cash desk). */
+    /** If true, validate immediately and request employee receipt confirmation. */
     autoValidate: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
-    const admin = await requireAdmin(ctx, args.token);
+    const admin = await requireAdminPage(ctx, args.token, "admin-ordres");
     const employee = await ctx.db.get(args.employeeId);
     if (!employee || employee.role !== "employee" || employee.resignedAt) {
       throw new Error("Employé introuvable");
@@ -262,6 +265,7 @@ export const requestPaymentForEmployee = mutation({
     }
 
     const autoValidate = args.autoValidate === true;
+    const now = Date.now();
     const note =
       args.note?.trim() ||
       `Demande créée par l'admin (${admin.name})`;
@@ -270,17 +274,20 @@ export const requestPaymentForEmployee = mutation({
       employeeId: args.employeeId,
       type: args.type,
       amount: args.amount,
-      status: autoValidate ? "VALIDE" : "DEMANDE",
+      status: autoValidate ? "A_CONFIRMER" : "DEMANDE",
       note,
-      requestedAt: Date.now(),
-      treatedAt: autoValidate ? Date.now() : undefined,
+      requestedAt: now,
+      treatedAt: autoValidate ? now : undefined,
+      disbursedAt: autoValidate ? now : undefined,
     });
 
     await notify(
       ctx,
       args.employeeId,
       autoValidate ? "Paiement validé" : "Demande de paiement créée",
-      `Une demande de ${args.amount.toLocaleString("fr-DZ")} DZD (${args.type}) a été créée par l'admin.`
+      autoValidate
+        ? `Une demande de ${args.amount.toLocaleString("fr-DZ")} DZD (${args.type}) a été créée et validée par l'admin. Confirmez sa réception dans votre espace Finances.`
+        : `Une demande de ${args.amount.toLocaleString("fr-DZ")} DZD (${args.type}) a été créée par l'admin.`
     );
 
     if (autoValidate) {
@@ -295,8 +302,8 @@ export const requestPaymentForEmployee = mutation({
         await notify(
           ctx,
           staff._id,
-          "Paiement à régler",
-          `${employee.name} — ${args.amount.toLocaleString("fr-DZ")} DZD (${args.type}) créé/validé par l'admin.`
+          "Confirmation de paiement en attente",
+          `${employee.name} — ${args.amount.toLocaleString("fr-DZ")} DZD (${args.type}) créé et validé par l'admin. En attente de confirmation de réception par l'employé.`
         );
       }
     }
@@ -312,7 +319,7 @@ export const salariesForMonth = query({
     year: v.number(),
   },
   handler: async (ctx, args) => {
-    await requireAdmin(ctx, args.token);
+    await requireAdminPage(ctx, args.token, "admin-salaires");
     const employees = (await ctx.db.query("users").collect())
       .filter(
         (u) =>
@@ -557,7 +564,7 @@ export const setSalariesBatch = mutation({
     ),
   },
   handler: async (ctx, args) => {
-    await requireAdmin(ctx, args.token);
+    await requireAdminPage(ctx, args.token, "admin-salaires");
 
     if (args.month < 1 || args.month > 12) {
       throw new Error("Mois invalide");
@@ -742,7 +749,7 @@ export const grantBonus = mutation({
     reason: v.string(),
   },
   handler: async (ctx, args) => {
-    await requireAdmin(ctx, args.token);
+    await requireAdminPage(ctx, args.token, "admin-primes");
     if (args.amount <= 0) throw new Error("Montant invalide");
 
     const id = await ctx.db.insert("bonuses", {
@@ -767,7 +774,7 @@ export const grantBonus = mutation({
 export const listPaymentOrders = query({
   args: { token: v.string() },
   handler: async (ctx, args) => {
-    await requireAdmin(ctx, args.token);
+    await requireAdminPage(ctx, args.token, "admin-ordres");
     const rows = await ctx.db.query("paymentOrders").collect();
     const result = [];
     for (const row of rows) {
@@ -782,7 +789,7 @@ export const listPaymentOrders = query({
 export const listBonuses = query({
   args: { token: v.string() },
   handler: async (ctx, args) => {
-    await requireAdmin(ctx, args.token);
+    await requireAdminPage(ctx, args.token, "admin-primes");
     const rows = await ctx.db.query("bonuses").collect();
     const result = [];
     for (const row of rows) {
@@ -801,7 +808,7 @@ export const employeeHistory = query({
     employeeId: v.id("users"),
   },
   handler: async (ctx, args) => {
-    await requireAdmin(ctx, args.token);
+    await requireAdminPage(ctx, args.token, "admin-ordres");
     const employee = await ctx.db.get(args.employeeId);
     if (!employee || employee.role !== "employee") {
       throw new Error("Employé introuvable");
@@ -858,23 +865,26 @@ export const treatPaymentOrder = mutation({
     orderId: v.id("paymentOrders"),
     status: v.union(
       v.literal("VALIDE"),
-      v.literal("PAYE"),
       v.literal("REJETE")
     ),
   },
   handler: async (ctx, args) => {
-    await requireAdmin(ctx, args.token);
+    await requireAdminPage(ctx, args.token, "admin-ordres");
     const order = await ctx.db.get(args.orderId);
     if (!order) throw new Error("Ordre introuvable");
+    if (order.status !== "DEMANDE") {
+      throw new Error("Seules les demandes en attente peuvent être traitées");
+    }
 
+    const treatedAt = Date.now();
     await ctx.db.patch(args.orderId, {
-      status: args.status,
-      treatedAt: Date.now(),
+      status: args.status === "VALIDE" ? "A_CONFIRMER" : "REJETE",
+      treatedAt,
+      ...(args.status === "VALIDE" ? { disbursedAt: treatedAt } : {}),
     });
 
     const labels = {
       VALIDE: "validée",
-      PAYE: "marquée comme payée",
       REJETE: "rejetée",
     } as const;
 
@@ -882,7 +892,9 @@ export const treatPaymentOrder = mutation({
       ctx,
       order.employeeId,
       "Demande de paiement",
-      `Votre demande de ${order.amount.toLocaleString("fr-DZ")} DZD a été ${labels[args.status]}.`
+      args.status === "VALIDE"
+        ? `Votre demande de ${order.amount.toLocaleString("fr-DZ")} DZD a été validée. Confirmez sa réception dans votre espace Finances.`
+        : `Votre demande de ${order.amount.toLocaleString("fr-DZ")} DZD a été ${labels[args.status]}.`
     );
 
     // After admin validation, finance desk can pay it
@@ -899,8 +911,8 @@ export const treatPaymentOrder = mutation({
         await notify(
           ctx,
           staff._id,
-          "Paiement à régler",
-          `${employee?.name ?? "Un collaborateur"} — ${order.amount.toLocaleString("fr-DZ")} DZD (${order.type}) validé par l'admin.`
+          "Confirmation de paiement en attente",
+          `${employee?.name ?? "Un collaborateur"} — ${order.amount.toLocaleString("fr-DZ")} DZD (${order.type}) validé par l'admin. En attente de confirmation de réception par l'employé.`
         );
       }
     }
@@ -915,7 +927,7 @@ export const validatePaymentOrdersBatch = mutation({
     orderIds: v.array(v.id("paymentOrders")),
   },
   handler: async (ctx, args) => {
-    await requireAdmin(ctx, args.token);
+    await requireAdminPage(ctx, args.token, "admin-ordres");
     const uniqueIds = [...new Set(args.orderIds)];
     if (uniqueIds.length === 0) {
       throw new Error("Sélectionnez au moins une demande");
@@ -944,8 +956,9 @@ export const validatePaymentOrdersBatch = mutation({
 
     for (const order of orders) {
       await ctx.db.patch(order._id, {
-        status: "VALIDE",
+        status: "A_CONFIRMER",
         treatedAt: now,
+        disbursedAt: now,
       });
 
       const employee = await ctx.db.get(order.employeeId);
@@ -953,14 +966,14 @@ export const validatePaymentOrdersBatch = mutation({
         ctx,
         order.employeeId,
         "Demande de paiement",
-        `Votre demande de ${order.amount.toLocaleString("fr-DZ")} DZD a été validée.`
+        `Votre demande de ${order.amount.toLocaleString("fr-DZ")} DZD a été validée. Confirmez sa réception dans votre espace Finances.`
       );
       for (const staff of financeStaff) {
         await notify(
           ctx,
           staff._id,
-          "Paiement à régler",
-          `${employee?.name ?? "Un collaborateur"} — ${order.amount.toLocaleString("fr-DZ")} DZD (${order.type}) validé par l'admin.`
+          "Confirmation de paiement en attente",
+          `${employee?.name ?? "Un collaborateur"} — ${order.amount.toLocaleString("fr-DZ")} DZD (${order.type}) validé par l'admin. En attente de confirmation de réception par l'employé.`
         );
       }
     }
@@ -984,25 +997,25 @@ export const listValidatedForFinance = query({
   },
 });
 
-/** Finance department: recent paid orders (read-only history). */
+/** Finance department: handed payments awaiting employee confirmation. */
 export const listPaidForFinance = query({
   args: { token: v.string() },
   handler: async (ctx, args) => {
     const staff = await requireFinanceStaff(ctx, args.token);
     const rows = await ctx.db
       .query("paymentOrders")
-      .withIndex("by_status", (q) => q.eq("status", "PAYE"))
+      .withIndex("by_status", (q) => q.eq("status", "A_CONFIRMER"))
       .collect();
 
     const result = await filterOrdersForFinanceWorkplace(ctx, staff, rows);
     return result
-      .sort((a, b) => (b.treatedAt ?? 0) - (a.treatedAt ?? 0))
+      .sort((a, b) => (b.disbursedAt ?? 0) - (a.disbursedAt ?? 0))
       .slice(0, 50);
   },
 });
 
-/** Finance staff marks a validated order as paid. */
-export const markPaidByFinance = mutation({
+/** Finance staff records that a validated payment was handed to the employee. */
+export const markDisbursedByFinance = mutation({
   args: {
     token: v.string(),
     orderId: v.id("paymentOrders"),
@@ -1012,7 +1025,7 @@ export const markPaidByFinance = mutation({
     const order = await ctx.db.get(args.orderId);
     if (!order) throw new Error("Ordre introuvable");
     if (order.status !== "VALIDE") {
-      throw new Error("Seules les demandes validées par l'admin peuvent être payées");
+      throw new Error("Seules les demandes validées par l'admin peuvent être remises");
     }
 
     if (staff.role !== "admin") {
@@ -1028,15 +1041,15 @@ export const markPaidByFinance = mutation({
     }
 
     await ctx.db.patch(args.orderId, {
-      status: "PAYE",
-      treatedAt: Date.now(),
+      status: "A_CONFIRMER",
+      disbursedAt: Date.now(),
     });
 
     await notify(
       ctx,
       order.employeeId,
-      "Paiement effectué",
-      `Votre demande de ${order.amount.toLocaleString("fr-DZ")} DZD a été marquée comme payée par ${staff.name}.`
+      "Confirmation de réception requise",
+      `Le paiement de ${order.amount.toLocaleString("fr-DZ")} DZD (${order.type}) vous a été remis. Confirmez sa réception dans votre espace Finances.`
     );
 
     const admins = (await ctx.db.query("users").collect()).filter(
@@ -1046,11 +1059,67 @@ export const markPaidByFinance = mutation({
       await notify(
         ctx,
         admin._id,
-        "Paiement effectué",
-        `${staff.name} a marqué payé ${order.amount.toLocaleString("fr-DZ")} DZD.`
+        "Paiement remis — confirmation attendue",
+        `${staff.name} a remis ${order.amount.toLocaleString("fr-DZ")} DZD à l'employé. En attente de sa confirmation.`
       );
     }
 
     return await ctx.db.get(args.orderId);
+  },
+});
+
+export const confirmPaymentReceived = mutation({
+  args: {
+    token: v.string(),
+    orderId: v.id("paymentOrders"),
+  },
+  handler: async (ctx, args) => {
+    const employee = await requireUser(ctx, args.token);
+    if (employee.role !== "employee") {
+      throw new Error("Seul l'employé destinataire peut confirmer la réception");
+    }
+    const order = await ctx.db.get(args.orderId);
+    if (!order || order.employeeId !== employee._id) {
+      throw new Error("Demande de paiement introuvable");
+    }
+    if (order.status !== "A_CONFIRMER") {
+      throw new Error("Ce paiement n'attend pas de confirmation");
+    }
+
+    const orders = await ctx.db.query("paymentOrders").collect();
+    const usedReferences = new Set(
+      orders
+        .map((paymentOrder) => paymentOrder.receiptReference)
+        .filter((reference): reference is string => reference !== undefined)
+    );
+    let receiptNumber = 1;
+    while (
+      receiptNumber <= 9999 &&
+      usedReferences.has(String(receiptNumber).padStart(4, "0"))
+    ) {
+      receiptNumber += 1;
+    }
+    if (receiptNumber > 9999) {
+      throw new Error("Tous les numéros de reçu à quatre chiffres sont utilisés");
+    }
+
+    await ctx.db.patch(order._id, {
+      status: "PAYE",
+      confirmedAt: Date.now(),
+      receiptReference: String(receiptNumber).padStart(4, "0"),
+    });
+
+    const admins = (await ctx.db.query("users").collect()).filter(
+      (user) => user.role === "admin" && user.isActive
+    );
+    for (const admin of admins) {
+      await notify(
+        ctx,
+        admin._id,
+        "Réception de paiement confirmée",
+        `${employee.name} a confirmé la réception de ${order.amount.toLocaleString("fr-DZ")} DZD (${order.type}). Le reçu est disponible dans les ordres de paiement.`
+      );
+    }
+    return await ctx.db.get(order._id);
   },
 });

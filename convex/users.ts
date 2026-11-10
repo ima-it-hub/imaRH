@@ -2,17 +2,20 @@ import { mutation, query } from "./_generated/server";
 import { v } from "convex/values";
 import {
   EMPLOYEE_PAGE_KEYS,
+  ASSIGNABLE_PAGE_KEYS,
   generateUniqueBarcode,
   hashPassword,
   normalizeUsername,
   publicUser,
   requireAdmin,
+  requireAdminAnyPage,
+  requireAdminPage,
 } from "./lib";
 
 export const list = query({
   args: { token: v.string() },
   handler: async (ctx, args) => {
-    await requireAdmin(ctx, args.token);
+    await requireAdminPage(ctx, args.token, "admin-employes");
     const users = await ctx.db.query("users").collect();
     const enriched = [];
     for (const u of users) {
@@ -31,7 +34,14 @@ export const list = query({
 export const listEmployees = query({
   args: { token: v.string() },
   handler: async (ctx, args) => {
-    await requireAdmin(ctx, args.token);
+    await requireAdminAnyPage(ctx, args.token, [
+      "admin-employes",
+      "admin-conges",
+      "admin-salaires",
+      "admin-primes",
+      "admin-ordres",
+      "admin-rapports",
+    ]);
     const users = await ctx.db.query("users").collect();
     return users
       .filter((u) => u.role === "employee" && !u.resignedAt)
@@ -44,7 +54,7 @@ export const listEmployees = query({
 export const listManagers = query({
   args: { token: v.string() },
   handler: async (ctx, args) => {
-    await requireAdmin(ctx, args.token);
+    await requireAdminPage(ctx, args.token, "admin-employes");
     const users = await ctx.db.query("users").collect();
     return users
       .filter((u) => u.isActive)
@@ -66,6 +76,7 @@ export const create = mutation({
     department: v.optional(v.string()),
     departmentId: v.optional(v.id("departments")),
     workplaceId: v.optional(v.id("workplaces")),
+    associatedAgentCode: v.optional(v.string()),
     managerId: v.optional(v.id("users")),
     phone: v.optional(v.string()),
     baseSalary: v.optional(v.number()),
@@ -77,7 +88,10 @@ export const create = mutation({
     zktecoUserId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    await requireAdmin(ctx, args.token);
+    const actor = await requireAdminPage(ctx, args.token, "admin-employes");
+    if (actor.role !== "admin" && args.role !== "employee") {
+      throw new Error("Seuls les administrateurs peuvent créer un compte admin");
+    }
 
     const username = normalizeUsername(args.username);
     if (username.length < 3) {
@@ -92,7 +106,7 @@ export const create = mutation({
       throw new Error("Ce nom d'utilisateur est déjà pris");
     }
 
-    const email = (args.email?.trim() || `${username}@gialco.local`).toLowerCase();
+    const email = (args.email?.trim() || `${username}@ima.dz`).toLowerCase();
     const existingEmail = await ctx.db
       .query("users")
       .withIndex("by_email", (q) => q.eq("email", email))
@@ -120,7 +134,7 @@ export const create = mutation({
     }
 
     let workplaceName = "";
-    let workplaceId = args.workplaceId;
+    const workplaceId = args.workplaceId;
     if (workplaceId) {
       const wp = await ctx.db.get(workplaceId);
       if (!wp) throw new Error("Lieu de travail introuvable");
@@ -128,23 +142,11 @@ export const create = mutation({
     }
 
     let departmentName = args.department?.trim() ?? "";
-    let departmentId = args.departmentId;
+    const departmentId = args.departmentId;
     if (departmentId) {
       const dept = await ctx.db.get(departmentId);
       if (!dept) throw new Error("Département introuvable");
       departmentName = dept.name;
-      if (dept.workplaceId) {
-        if (workplaceId && dept.workplaceId !== workplaceId) {
-          throw new Error(
-            "Le département doit appartenir au lieu de travail choisi"
-          );
-        }
-        if (!workplaceId) {
-          workplaceId = dept.workplaceId;
-          const wp = await ctx.db.get(dept.workplaceId);
-          workplaceName = wp?.name ?? "";
-        }
-      }
     }
 
     if (args.managerId) {
@@ -159,11 +161,13 @@ export const create = mutation({
     const name = `${firstName} ${lastName}`.trim();
     const quota = args.annualLeaveQuota ?? 30;
 
+    const allowedPageKeys =
+      actor.role === "admin" ? ASSIGNABLE_PAGE_KEYS : EMPLOYEE_PAGE_KEYS;
     const allowedPages =
       args.role === "admin"
         ? [...EMPLOYEE_PAGE_KEYS]
-        : args.allowedPages.filter((p) =>
-            (EMPLOYEE_PAGE_KEYS as readonly string[]).includes(p)
+        : args.allowedPages.filter((page) =>
+            (allowedPageKeys as readonly string[]).includes(page)
           );
 
     const passwordHash = await hashPassword(args.password);
@@ -203,6 +207,7 @@ export const create = mutation({
       departmentId,
       workplace: workplaceName || undefined,
       workplaceId,
+      associatedAgentCode: args.associatedAgentCode?.trim() || undefined,
       managerId: args.role === "employee" ? args.managerId : undefined,
       hireDate:
         args.hireDate && args.hireDate > 0 ? args.hireDate : Date.now(),
@@ -238,8 +243,8 @@ export const updatePages = mutation({
       throw new Error("Les administrateurs ont toujours un accès complet");
     }
 
-    const allowedPages = args.allowedPages.filter((p) =>
-      (EMPLOYEE_PAGE_KEYS as readonly string[]).includes(p)
+    const allowedPages = args.allowedPages.filter((page) =>
+      (ASSIGNABLE_PAGE_KEYS as readonly string[]).includes(page)
     );
 
     await ctx.db.patch(args.userId, { allowedPages });
@@ -257,6 +262,7 @@ export const updateEmployee = mutation({
     department: v.optional(v.string()),
     departmentId: v.optional(v.id("departments")),
     workplaceId: v.optional(v.id("workplaces")),
+    associatedAgentCode: v.optional(v.string()),
     managerId: v.optional(v.id("users")),
     phone: v.string(),
     baseSalary: v.number(),
@@ -269,9 +275,12 @@ export const updateEmployee = mutation({
     zktecoUserId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    await requireAdmin(ctx, args.token);
+    const actor = await requireAdminPage(ctx, args.token, "admin-employes");
     const user = await ctx.db.get(args.userId);
     if (!user) throw new Error("Utilisateur introuvable");
+    if (actor.role !== "admin" && user.role !== "employee") {
+      throw new Error("Seuls les administrateurs peuvent modifier un compte admin");
+    }
 
     const firstName = args.firstName.trim();
     const lastName = args.lastName.trim();
@@ -313,31 +322,11 @@ export const updateEmployee = mutation({
     }
 
     let departmentName = args.department?.trim() ?? user.department ?? "";
-    let departmentId = args.departmentId ?? user.departmentId;
+    const departmentId = args.departmentId ?? user.departmentId;
     if (args.departmentId) {
       const dept = await ctx.db.get(args.departmentId);
       if (!dept) throw new Error("Département introuvable");
       departmentName = dept.name;
-      departmentId = dept._id;
-      if (dept.workplaceId) {
-        if (workplaceId && dept.workplaceId !== workplaceId) {
-          throw new Error(
-            "Le département doit appartenir au lieu de travail choisi"
-          );
-        }
-        if (!workplaceId) {
-          workplaceId = dept.workplaceId;
-          const wp = await ctx.db.get(dept.workplaceId);
-          workplaceName = wp?.name ?? workplaceName;
-        }
-      }
-    } else if (departmentId) {
-      const dept = await ctx.db.get(departmentId);
-      if (dept?.workplaceId && workplaceId && dept.workplaceId !== workplaceId) {
-        throw new Error(
-          "Changez aussi le département pour qu'il corresponde au lieu de travail"
-        );
-      }
     }
 
     if (user.role === "employee" && !workplaceId) {
@@ -370,6 +359,7 @@ export const updateEmployee = mutation({
       departmentId,
       workplace: workplaceName || undefined,
       workplaceId,
+      associatedAgentCode: args.associatedAgentCode?.trim() || undefined,
       ...(args.managerId !== undefined
         ? { managerId: args.managerId }
         : {}),
@@ -421,7 +411,7 @@ export const setBaseBonus = mutation({
 export const ensureBarcodes = mutation({
   args: { token: v.string() },
   handler: async (ctx, args) => {
-    await requireAdmin(ctx, args.token);
+    await requireAdminPage(ctx, args.token, "admin-employes");
     const users = await ctx.db.query("users").collect();
     let created = 0;
     for (const user of users) {
@@ -442,7 +432,7 @@ export const setActive = mutation({
     isActive: v.boolean(),
   },
   handler: async (ctx, args) => {
-    const admin = await requireAdmin(ctx, args.token);
+    const admin = await requireAdminPage(ctx, args.token, "admin-employes");
 
     if (admin._id === args.userId && !args.isActive) {
       throw new Error("Vous ne pouvez pas désactiver votre propre compte");
@@ -450,6 +440,9 @@ export const setActive = mutation({
 
     const user = await ctx.db.get(args.userId);
     if (!user) throw new Error("Utilisateur introuvable");
+    if (admin.role !== "admin" && user.role !== "employee") {
+      throw new Error("Seuls les administrateurs peuvent modifier un compte admin");
+    }
     if (user.resignedAt) {
       throw new Error("Cet employé a déjà démissionné");
     }
@@ -478,7 +471,7 @@ export const resign = mutation({
     userId: v.id("users"),
   },
   handler: async (ctx, args) => {
-    const admin = await requireAdmin(ctx, args.token);
+    const admin = await requireAdminPage(ctx, args.token, "admin-employes");
     if (admin._id === args.userId) {
       throw new Error("Vous ne pouvez pas enregistrer votre propre démission");
     }

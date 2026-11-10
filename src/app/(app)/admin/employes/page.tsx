@@ -17,7 +17,7 @@ import {
   inputClass,
 } from "@/components/ui";
 import { useAuth } from "@/lib/auth";
-import { APP_PAGES } from "@/lib/pages";
+import { APP_PAGES, EMPLOYEE_PAGES } from "@/lib/pages";
 import { formatDate, moneyDZD, todayISOLocal } from "@/lib/format";
 
 const APP_TZ = "Africa/Algiers";
@@ -33,7 +33,7 @@ function hireDateToTimestamp(isoDate: string) {
 }
 
 export default function AdminEmployesPage() {
-  const { token } = useAuth();
+  const { token, user } = useAuth();
   const [search, setSearch] = useState("");
   const [firstName, setFirstName] = useState("");
   const [lastName, setLastName] = useState("");
@@ -49,6 +49,7 @@ export default function AdminEmployesPage() {
   const [annualLeaveQuota, setAnnualLeaveQuota] = useState("30");
   const [hireDate, setHireDate] = useState(todayISOLocal());
   const [zktecoUserId, setZktecoUserId] = useState("");
+  const [associatedAgentCode, setAssociatedAgentCode] = useState("");
 
   const users = useQuery(api.users.list, token ? { token } : "skip");
   const workplaces = useQuery(
@@ -56,17 +57,6 @@ export default function AdminEmployesPage() {
     token ? { token } : "skip"
   );
   const departments = useQuery(
-    api.departments.listOptions,
-    token
-      ? {
-          token,
-          workplaceId: workplaceId
-            ? (workplaceId as Id<"workplaces">)
-            : undefined,
-        }
-      : "skip"
-  );
-  const allDepartments = useQuery(
     api.departments.listOptions,
     token ? { token } : "skip"
   );
@@ -78,7 +68,9 @@ export default function AdminEmployesPage() {
   const updateEmployee = useMutation(api.users.updateEmployee);
   const ensureBarcodes = useMutation(api.users.ensureBarcodes);
   const [allowedPages, setAllowedPages] = useState<string[]>(
-    APP_PAGES.map((p) => p.key)
+    EMPLOYEE_PAGES.filter((page) => page.pageKey !== "caisse-paiements").map(
+      (page) => page.key
+    )
   );
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
@@ -152,6 +144,10 @@ export default function AdminEmployesPage() {
           role === "employee" && zktecoUserId.trim()
             ? zktecoUserId.trim()
             : undefined,
+        associatedAgentCode:
+          role === "employee" && associatedAgentCode.trim()
+            ? associatedAgentCode.trim()
+            : undefined,
       });
       setSuccess("Collaborateur créé");
       setFirstName("");
@@ -165,6 +161,7 @@ export default function AdminEmployesPage() {
       setBaseBonus("10000");
       setHireDate(todayISOLocal());
       setZktecoUserId("");
+      setAssociatedAgentCode("");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Erreur");
     } finally {
@@ -185,7 +182,7 @@ export default function AdminEmployesPage() {
   }
 
   return (
-    <RequireAuth role="admin">
+    <RequireAuth page="admin-employes">
       <PageShell
         title="Gestion des collaborateurs"
         description="Création, accès aux pages, salaires et activation des comptes."
@@ -278,17 +275,16 @@ export default function AdminEmployesPage() {
                   }
                 >
                   <option value="employee">Employé</option>
-                  <option value="admin">Admin / RH</option>
+                  {user?.role === "admin" ? (
+                    <option value="admin">Admin / RH</option>
+                  ) : null}
                 </select>
               </Field>
               <Field label="Lieu de travail">
                 <select
                   className={inputClass}
                   value={workplaceId}
-                  onChange={(e) => {
-                    setWorkplaceId(e.target.value);
-                    setDepartmentId("");
-                  }}
+                  onChange={(e) => setWorkplaceId(e.target.value)}
                   required={role === "employee"}
                 >
                   <option value="">Choisir…</option>
@@ -305,13 +301,8 @@ export default function AdminEmployesPage() {
                   value={departmentId}
                   onChange={(e) => setDepartmentId(e.target.value)}
                   required={role === "employee"}
-                  disabled={!workplaceId}
                 >
-                  <option value="">
-                    {workplaceId
-                      ? "Choisir…"
-                      : "Choisir un lieu de travail d'abord"}
-                  </option>
+                  <option value="">Choisir…</option>
                   {(departments ?? []).map((d) => (
                     <option key={d._id} value={d._id}>
                       {d.name}
@@ -321,6 +312,13 @@ export default function AdminEmployesPage() {
               </Field>
               {role === "employee" ? (
                 <>
+                  <Field label="Code AssociatedAgent (Silwan)">
+                    <input
+                      className={inputClass}
+                      value={associatedAgentCode}
+                      onChange={(e) => setAssociatedAgentCode(e.target.value)}
+                    />
+                  </Field>
                   <Field label="Manager">
                     <select
                       required
@@ -393,8 +391,16 @@ export default function AdminEmployesPage() {
                   <p className="mb-2 text-xs font-semibold uppercase text-zinc-500">
                     Pages visibles
                   </p>
+                  <p className="mb-2 text-xs text-zinc-500">
+                    Les pages d&apos;administration sélectionnées donnent accès
+                    à leurs actions. Seul un administrateur peut modifier ces
+                    droits ou créer un compte admin.
+                  </p>
                   <div className="space-y-2">
-                    {APP_PAGES.map((page) => (
+                    <p className="pt-1 text-xs font-semibold text-zinc-500">
+                      Espace employé
+                    </p>
+                    {APP_PAGES.filter((page) => !page.key.startsWith("admin-")).map((page) => (
                       <label
                         key={page.key}
                         className="flex items-center gap-2 text-sm"
@@ -414,6 +420,35 @@ export default function AdminEmployesPage() {
                         {page.label}
                       </label>
                     ))}
+                    {user?.role === "admin" ? (
+                      <>
+                        <p className="pt-2 text-xs font-semibold text-zinc-500">
+                          Pages d&apos;administration
+                        </p>
+                        {APP_PAGES.filter((page) =>
+                          page.key.startsWith("admin-")
+                        ).map((page) => (
+                          <label
+                            key={page.key}
+                            className="flex items-center gap-2 text-sm"
+                          >
+                            <input
+                              type="checkbox"
+                              className="accent-[#0088E8]"
+                              checked={allowedPages.includes(page.key)}
+                              onChange={() =>
+                                setAllowedPages((prev) =>
+                                  prev.includes(page.key)
+                                    ? prev.filter((p) => p !== page.key)
+                                    : [...prev, page.key]
+                                )
+                              }
+                            />
+                            {page.label}
+                          </label>
+                        ))}
+                      </>
+                    ) : null}
                   </div>
                 </div>
               ) : null}
@@ -564,47 +599,90 @@ export default function AdminEmployesPage() {
                             <EmployeeBarcode value={u.barcode} name={u.name} />
                           </div>
 
-                          <div className="mt-4">
-                            <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-500">
-                              Pages visibles
-                            </p>
-                            <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-                              {APP_PAGES.map((page) => {
-                                const checked = u.allowedPages.includes(
-                                  page.key
-                                );
-                                return (
-                                  <label
-                                    key={page.key}
-                                    className={`flex cursor-pointer items-center gap-2 rounded-xl border px-3 py-2 text-sm ${
-                                      checked
-                                        ? "border-[#0088E8]/30 bg-[#0088E8]/5"
-                                        : "border-zinc-200 bg-zinc-50"
-                                    }`}
-                                  >
-                                    <input
-                                      type="checkbox"
-                                      className="accent-[#0088E8]"
-                                      checked={checked}
-                                      onChange={() =>
-                                        onTogglePage(
-                                          u._id,
-                                          u.allowedPages,
-                                          page.key
-                                        )
-                                      }
-                                    />
-                                    {page.label}
-                                  </label>
-                                );
-                              })}
+                          {user?.role === "admin" ? (
+                            <div className="mt-4">
+                              <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-500">
+                                Pages visibles
+                              </p>
+                              <p className="mb-2 text-xs font-semibold text-zinc-500">
+                                Espace employé
+                              </p>
+                              <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                                {APP_PAGES.filter(
+                                  (page) => !page.key.startsWith("admin-")
+                                ).map((page) => {
+                                  const checked = u.allowedPages.includes(
+                                    page.key
+                                  );
+                                  return (
+                                    <label
+                                      key={page.key}
+                                      className={`flex cursor-pointer items-center gap-2 rounded-xl border px-3 py-2 text-sm ${
+                                        checked
+                                          ? "border-[#0088E8]/30 bg-[#0088E8]/5"
+                                          : "border-zinc-200 bg-zinc-50"
+                                      }`}
+                                    >
+                                      <input
+                                        type="checkbox"
+                                        className="accent-[#0088E8]"
+                                        checked={checked}
+                                        onChange={() =>
+                                          onTogglePage(
+                                            u._id,
+                                            u.allowedPages,
+                                            page.key
+                                          )
+                                        }
+                                      />
+                                      {page.label}
+                                    </label>
+                                  );
+                                })}
+                              </div>
+                              <p className="mb-2 mt-4 text-xs font-semibold text-zinc-500">
+                                Pages d&apos;administration
+                              </p>
+                              <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                                {APP_PAGES.filter((page) =>
+                                  page.key.startsWith("admin-")
+                                ).map((page) => {
+                                  const checked = u.allowedPages.includes(
+                                    page.key
+                                  );
+                                  return (
+                                    <label
+                                      key={page.key}
+                                      className={`flex cursor-pointer items-center gap-2 rounded-xl border px-3 py-2 text-sm ${
+                                        checked
+                                          ? "border-[#0088E8]/30 bg-[#0088E8]/5"
+                                          : "border-zinc-200 bg-zinc-50"
+                                      }`}
+                                    >
+                                      <input
+                                        type="checkbox"
+                                        className="accent-[#0088E8]"
+                                        checked={checked}
+                                        onChange={() =>
+                                          onTogglePage(
+                                            u._id,
+                                            u.allowedPages,
+                                            page.key
+                                          )
+                                        }
+                                      />
+                                      {page.label}
+                                    </label>
+                                  );
+                                })}
+                              </div>
                             </div>
-                          </div>
+                          ) : null}
 
                           <EmployeeQuickEdit
                             user={u}
                             token={token!}
-                            departments={allDepartments ?? []}
+                            departments={departments ?? []}
                             workplaces={workplaces ?? []}
                             managers={(managers ?? []).filter(
                               (m) => m._id !== u._id
@@ -652,6 +730,7 @@ function EmployeeQuickEdit({
     annualLeaveBalance: number;
     hireDate?: number | null;
     zktecoUserId?: string;
+    associatedAgentCode?: string;
   };
   token: string;
   departments: {
@@ -679,6 +758,7 @@ function EmployeeQuickEdit({
     annualLeaveBalance: number;
     hireDate?: number;
     zktecoUserId?: string;
+    associatedAgentCode?: string;
   }) => Promise<unknown>;
 }) {
   const [open, setOpen] = useState(false);
@@ -695,14 +775,9 @@ function EmployeeQuickEdit({
     annualLeaveBalance: user.annualLeaveBalance,
     hireDate: hireDateInputValue(user.hireDate),
     zktecoUserId: user.zktecoUserId ?? "",
+    associatedAgentCode: user.associatedAgentCode ?? "",
   });
   const [msg, setMsg] = useState("");
-
-  const departmentsForWorkplace = departments.filter(
-    (d) =>
-      !form.workplaceId ||
-      d.workplaceId === (form.workplaceId as Id<"workplaces">)
-  );
 
   return (
     <div className="mt-4 border-t border-zinc-100 pt-4">
@@ -734,11 +809,7 @@ function EmployeeQuickEdit({
               className={inputClass}
               value={form.workplaceId}
               onChange={(e) =>
-                setForm((prev) => ({
-                  ...prev,
-                  workplaceId: e.target.value,
-                  departmentId: "",
-                }))
+                setForm((prev) => ({ ...prev, workplaceId: e.target.value }))
               }
             >
               <option value="">Choisir…</option>
@@ -758,12 +829,24 @@ function EmployeeQuickEdit({
               }
             >
               <option value="">Choisir…</option>
-              {departmentsForWorkplace.map((d) => (
+              {departments.map((d) => (
                 <option key={d._id} value={d._id}>
                   {d.name}
                 </option>
               ))}
             </select>
+          </Field>
+          <Field label="Code AssociatedAgent (Silwan)">
+            <input
+              className={inputClass}
+              value={form.associatedAgentCode}
+              onChange={(e) =>
+                setForm((prev) => ({
+                  ...prev,
+                  associatedAgentCode: e.target.value,
+                }))
+              }
+            />
           </Field>
           <Field label="Manager">
             <select
@@ -895,6 +978,7 @@ function EmployeeQuickEdit({
                   annualLeaveBalance: form.annualLeaveBalance,
                   hireDate: hireTs,
                   zktecoUserId: form.zktecoUserId,
+                  associatedAgentCode: form.associatedAgentCode,
                 });
                 setMsg("Fiche enregistrée");
               }}

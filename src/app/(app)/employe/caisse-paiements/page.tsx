@@ -21,23 +21,23 @@ export default function CaissePaiementsPage() {
     api.finances.listValidatedForFinance,
     token ? { token } : "skip"
   );
-  const paid = useQuery(
+  const awaitingConfirmation = useQuery(
     api.finances.listPaidForFinance,
     token ? { token } : "skip"
   );
-  const markPaid = useMutation(api.finances.markPaidByFinance);
+  const markDisbursed = useMutation(api.finances.markDisbursedByFinance);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [msg, setMsg] = useState("");
 
-  async function onMarkPaid(orderId: Id<"paymentOrders">) {
+  async function onRecordDisbursement(orderId: Id<"paymentOrders">) {
     if (!token) return;
     setBusyId(orderId);
     setError("");
     setMsg("");
     try {
-      await markPaid({ token, orderId });
-      setMsg("Paiement marqué comme payé");
+      await markDisbursed({ token, orderId });
+      setMsg("Remise enregistrée — en attente de confirmation de l'employé");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Erreur");
     } finally {
@@ -49,7 +49,7 @@ export default function CaissePaiementsPage() {
     <RequireAuth role="employee" page="caisse-paiements">
       <PageShell
         title="Caisse / Paiements"
-        description="Demandes validées de votre lieu de travail — marquez-les payées après règlement."
+        description="Demandes validées de votre lieu de travail — enregistrez la remise après avoir remis l'argent à l'employé."
       >
         {error ? (
           <p className="mb-4 text-sm text-red-600">{error}</p>
@@ -112,9 +112,9 @@ export default function CaissePaiementsPage() {
                         type="button"
                         className="px-3 py-1.5 text-xs"
                         disabled={busyId === order._id}
-                        onClick={() => void onMarkPaid(order._id)}
+                        onClick={() => void onRecordDisbursement(order._id)}
                       >
-                        {busyId === order._id ? "…" : "Marquer payé"}
+                        {busyId === order._id ? "…" : "Enregistrer la remise"}
                       </PrimaryButton>
                     </td>
                   </tr>
@@ -130,7 +130,7 @@ export default function CaissePaiementsPage() {
         </Card>
 
         <h2 className="mb-3 text-lg font-semibold text-zinc-900">
-          Récemment payées
+          Remises en attente de confirmation
         </h2>
         <Card>
           <div className="overflow-x-auto">
@@ -140,12 +140,12 @@ export default function CaissePaiementsPage() {
                   <th className="pb-3 pr-3 text-left">Employé</th>
                   <th className="pb-3 pr-3 text-left">Type</th>
                   <th className="pb-3 pr-3 text-right">Montant</th>
-                  <th className="pb-3 pr-3 text-left">Payée le</th>
+                  <th className="pb-3 pr-3 text-left">Remise le</th>
                   <th className="pb-3 text-left">Statut</th>
                 </tr>
               </thead>
               <tbody>
-                {(paid ?? []).map((order) => (
+                {(awaitingConfirmation ?? []).map((order) => (
                   <tr key={order._id} className="border-t border-zinc-100">
                     <td className="py-3 pr-3 font-medium text-zinc-900">
                       {order.employee.name}
@@ -155,7 +155,7 @@ export default function CaissePaiementsPage() {
                       {moneyDZD(order.amount)}
                     </td>
                     <td className="py-3 pr-3 whitespace-nowrap text-zinc-600">
-                      {formatDate(order.treatedAt ?? order.requestedAt)}
+                      {formatDate(order.disbursedAt ?? order.requestedAt)}
                     </td>
                     <td className="py-3">
                       <Badge className={statusBadgeClass(order.status)}>
@@ -166,8 +166,10 @@ export default function CaissePaiementsPage() {
                 ))}
               </tbody>
             </table>
-            {!paid?.length ? (
-              <p className="py-6 text-sm text-zinc-500">Aucun paiement récent.</p>
+            {!awaitingConfirmation?.length ? (
+              <p className="py-6 text-sm text-zinc-500">
+                Aucune remise en attente de confirmation.
+              </p>
             ) : null}
           </div>
         </Card>

@@ -1,11 +1,12 @@
 import { mutation, query } from "./_generated/server";
 import { v } from "convex/values";
-import { getSettings, requireAdmin } from "./lib";
+import { getSettings, requireAdminPage } from "./lib";
 
 export const get = query({
   args: { token: v.union(v.string(), v.null()) },
   handler: async (ctx, args) => {
     if (!args.token) return null;
+    await requireAdminPage(ctx, args.token, "admin-parametres");
     return await getSettings(ctx);
   },
 });
@@ -36,7 +37,7 @@ export const update = mutation({
     workingDaysPerMonth: v.number(),
   },
   handler: async (ctx, args) => {
-    await requireAdmin(ctx, args.token);
+    await requireAdminPage(ctx, args.token, "admin-parametres");
 
     const existing = await ctx.db
       .query("settings")

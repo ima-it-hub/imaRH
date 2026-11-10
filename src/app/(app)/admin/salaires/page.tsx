@@ -182,7 +182,7 @@ export default function AdminSalairesPage() {
   }
 
   return (
-    <RequireAuth role="admin">
+    <RequireAuth page="admin-salaires">
       <PageShell
         title="Salaires"
         description="Définissez les salaires mensuels et les déductions."

@@ -12,6 +12,27 @@ export const EMPLOYEE_PAGE_KEYS = [
 
 export type EmployeePageKey = (typeof EMPLOYEE_PAGE_KEYS)[number];
 
+export const ADMIN_PAGE_KEYS = [
+  "admin-dashboard",
+  "admin-employes",
+  "admin-departements",
+  "admin-scan",
+  "admin-pointages",
+  "admin-conges",
+  "admin-salaires",
+  "admin-primes",
+  "admin-calcul-primes",
+  "admin-ordres",
+  "admin-rapports",
+  "admin-parametres",
+] as const;
+
+export type AdminPageKey = (typeof ADMIN_PAGE_KEYS)[number];
+export const ASSIGNABLE_PAGE_KEYS = [
+  ...EMPLOYEE_PAGE_KEYS,
+  ...ADMIN_PAGE_KEYS,
+] as const;
+
 /** @deprecated alias kept for older code paths */
 export const PAGE_KEYS = EMPLOYEE_PAGE_KEYS;
 
@@ -71,6 +92,29 @@ export async function requireAdmin(
   return user;
 }
 
+export async function requireAdminPage(
+  ctx: QueryCtx | MutationCtx,
+  token: string,
+  pageKey: AdminPageKey
+) {
+  return await requireAdminAnyPage(ctx, token, [pageKey]);
+}
+
+export async function requireAdminAnyPage(
+  ctx: QueryCtx | MutationCtx,
+  token: string,
+  pageKeys: readonly AdminPageKey[]
+) {
+  const user = await requireUser(ctx, token);
+  if (
+    user.role !== "admin" &&
+    !pageKeys.some((pageKey) => user.allowedPages.includes(pageKey))
+  ) {
+    throw new Error("Accès à cette page administrateur requis");
+  }
+  return user;
+}
+
 export function normalizeUsername(username: string) {
   return username.trim().toLowerCase().replace(/\s+/g, "");
 }
@@ -97,6 +141,7 @@ export function publicUser(user: Doc<"users">) {
     departmentId: user.departmentId ?? null,
     workplace: user.workplace ?? "",
     workplaceId: user.workplaceId ?? null,
+    associatedAgentCode: user.associatedAgentCode ?? "",
     managerId: user.managerId ?? null,
     baseBonus: user.baseBonus ?? 0,
     hireDate: user.hireDate ?? null,
@@ -109,24 +154,47 @@ export function publicUser(user: Doc<"users">) {
   };
 }
 
-/** Average score / 5 → percentage (0–100). */
+/** Weighted score / 5 → percentage (0–100). */
 export function evaluationPercentage(
-  scores: { points: number }[]
+  scores: { points: number; weightPercent?: number }[]
 ): number {
   if (!scores.length) return 0;
-  const sum = scores.reduce((s, row) => s + row.points, 0);
-  const max = scores.length * 5;
-  return Math.round((sum / max) * 1000) / 10;
+  const weights = scores.map((row) => row.weightPercent ?? 1);
+  const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
+  if (totalWeight <= 0) {
+    const sum = scores.reduce((total, row) => total + row.points, 0);
+    return Math.round((sum / (scores.length * 5)) * 1000) / 10;
+  }
+  const weightedScore = scores.reduce(
+    (sum, row, index) => sum + row.points * weights[index]!,
+    0
+  );
+  return Math.round((weightedScore / (totalWeight * 5)) * 1000) / 10;
+}
+
+export function departmentPrimeWeights(
+  department?: Doc<"departments"> | null
+) {
+  return {
+    evaluationWeightPercent: department?.evaluationWeightPercent ?? 20,
+    realisationWeightPercent: department?.realisationWeightPercent ?? 80,
+    companyRealisationWeightPercent:
+      department?.companyRealisationWeightPercent ?? 0,
+  };
 }
 
 export function computeBasePrime(args: {
   basePrime: number;
   realisation: number;
   objective: number;
+  companyRealisationRatio?: number;
   recouvrement: number;
   recoveryObjective: number;
   evaluationPercent: number;
   applyRecoveryAdjustment: boolean;
+  evaluationWeightPercent?: number;
+  realisationWeightPercent?: number;
+  companyRealisationWeightPercent?: number;
 }) {
   const realisation = Math.max(0, args.realisation);
   const objective = Math.max(0, args.objective);
@@ -135,12 +203,27 @@ export function computeBasePrime(args: {
   const evaluationPercent = Math.max(0, Math.min(100, args.evaluationPercent));
 
   const objectiveRatio = objective > 0 ? realisation / objective : 0;
+  const companyRealisationRatio = Math.max(
+    0,
+    args.companyRealisationRatio ?? 0
+  );
   const recoveryRatio =
     recoveryObjective > 0 ? recouvrement / recoveryObjective : 0;
   const primeBase = Math.max(0, args.basePrime);
-  const objectiveAmount = Math.round(primeBase * 0.8 * objectiveRatio);
+  const objectiveWeightPercent = args.realisationWeightPercent ?? 80;
+  const evaluationWeightPercent = args.evaluationWeightPercent ?? 20;
+  const companyRealisationWeightPercent =
+    args.companyRealisationWeightPercent ?? 0;
+  const objectiveAmount = Math.round(
+    primeBase * (objectiveWeightPercent / 100) * objectiveRatio
+  );
+  const companyRealisationAmount = Math.round(
+    primeBase *
+      (companyRealisationWeightPercent / 100) *
+      companyRealisationRatio
+  );
   const evaluationAmount = Math.round(
-    primeBase * 0.2 * (evaluationPercent / 100)
+    primeBase * (evaluationWeightPercent / 100) * (evaluationPercent / 100)
   );
   let recoveryAmount = 0;
 
@@ -162,21 +245,25 @@ export function computeBasePrime(args: {
 
   const totalAmount = Math.max(
     0,
-    objectiveAmount + evaluationAmount + recoveryAmount
+    objectiveAmount + companyRealisationAmount + evaluationAmount + recoveryAmount
   );
 
   return {
     primeBase,
     objectiveRatio: Math.round(objectiveRatio * 1000) / 1000,
+    companyRealisationRatio:
+      Math.round(companyRealisationRatio * 1000) / 1000,
+    companyRealisationAmount,
     recoveryRatio: Math.round(recoveryRatio * 1000) / 1000,
     objectiveAmount,
     recoveryAmount,
     evaluationAmount,
     evaluationPercent,
     totalAmount,
-    objectiveWeightPercent: 80,
+    objectiveWeightPercent,
     recoveryWeightPercent: 0,
-    evaluationWeightPercent: 20,
+    evaluationWeightPercent,
+    companyRealisationWeightPercent,
     employeeBonusPercent: 0,
   };
 }

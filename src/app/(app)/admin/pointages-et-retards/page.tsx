@@ -96,7 +96,7 @@ export default function AdminPointagesPage() {
   );
 
   return (
-    <RequireAuth role="admin">
+    <RequireAuth page="admin-pointages">
       <PageShell
         title="Pointages & Retards"
         description="Temps travaillé vs durée obligatoire. Vous pouvez corriger les minutes de retard (la retenue sur le solde se recalcule)."

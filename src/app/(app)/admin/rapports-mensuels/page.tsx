@@ -99,11 +99,23 @@ export default function AdminReportsPage() {
     );
   }, [employees, reports, periodYear, periodMonth, filterEmployeeId]);
 
-  function draftPct(draft: Draft | undefined) {
-    const values = Object.values(draft?.scores ?? {});
-    if (!values.length) return 0;
-    const sum = values.reduce((a, b) => a + b, 0);
-    return Math.round((sum / (values.length * 5)) * 1000) / 10;
+  function draftPct(
+    draft: Draft | undefined,
+    conditionWeights: Record<string, number>
+  ) {
+    const entries = Object.entries(draft?.scores ?? {});
+    if (!entries.length) return 0;
+    const totalWeight = entries.reduce(
+      (sum, [conditionId]) => sum + (conditionWeights[conditionId] ?? 1),
+      0
+    );
+    if (totalWeight <= 0) return 0;
+    const weightedScore = entries.reduce(
+      (sum, [conditionId, points]) =>
+        sum + points * (conditionWeights[conditionId] ?? 1),
+      0
+    );
+    return Math.round((weightedScore / (totalWeight * 5)) * 1000) / 10;
   }
 
   async function onConfirm(reportId: string) {
@@ -134,7 +146,7 @@ export default function AdminReportsPage() {
   }
 
   return (
-    <RequireAuth role="admin">
+    <RequireAuth page="admin-rapports">
       <PageShell
         title="Rapports & évaluations"
         description="Revoir les évaluations soumises. La confirmation des primes se fait aussi sur la page Primes."
@@ -193,7 +205,7 @@ export default function AdminReportsPage() {
             {pending.map((report) => {
               const draft = drafts[report._id];
               const open = expandedId === report._id;
-              const pct = draftPct(draft);
+              const pct = draftPct(draft, report.conditionWeights);
               return (
                 <div
                   key={report._id}

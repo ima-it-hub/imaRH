@@ -20,6 +20,7 @@ import { useAuth } from "@/lib/auth";
 type WorkplaceDraft = {
   name: string;
   description: string;
+  associatedAgentCode: string;
   workStart: string;
   workEnd: string;
   lateToleranceMinutes: string;
@@ -50,6 +51,8 @@ export default function AdminParametresPage() {
 
   const [newWorkplaceName, setNewWorkplaceName] = useState("");
   const [newWorkplaceDescription, setNewWorkplaceDescription] = useState("");
+  const [newWorkplaceAssociatedAgentCode, setNewWorkplaceAssociatedAgentCode] =
+    useState("");
   const [newWorkplaceOpen, setNewWorkplaceOpen] = useState(false);
   const [expandedWorkplaceId, setExpandedWorkplaceId] =
     useState<Id<"workplaces"> | null>(null);
@@ -66,6 +69,7 @@ export default function AdminParametresPage() {
       workplaceDrafts[workplace._id] = {
         name: workplace.name,
         description: workplace.description ?? "",
+        associatedAgentCode: workplace.associatedAgentCode ?? "",
         workStart: timeInputValue(
           workplace.workStartHour ?? settings.workStartHour,
           workplace.workStartMinute ?? settings.workStartMinute
@@ -117,6 +121,7 @@ export default function AdminParametresPage() {
         token,
         name: newWorkplaceName,
         description: newWorkplaceDescription,
+        associatedAgentCode: newWorkplaceAssociatedAgentCode,
         schedule: {
           workStartHour: settings.workStartHour,
           workStartMinute: settings.workStartMinute,
@@ -132,6 +137,7 @@ export default function AdminParametresPage() {
       });
       setNewWorkplaceName("");
       setNewWorkplaceDescription("");
+      setNewWorkplaceAssociatedAgentCode("");
       if (row) setExpandedWorkplaceId(row._id);
       setNewWorkplaceOpen(false);
       setMsg("Lieu et horaires créés");
@@ -163,6 +169,7 @@ export default function AdminParametresPage() {
         workplaceId,
         name: draft.name,
         description: draft.description,
+        associatedAgentCode: draft.associatedAgentCode,
         schedule: {
           workStartHour: start.hour,
           workStartMinute: start.minute,
@@ -212,7 +219,7 @@ export default function AdminParametresPage() {
   }
 
   return (
-    <RequireAuth role="admin">
+    <RequireAuth page="admin-parametres">
       <PageShell
         title="Paramètres RH"
         description="Gestion des lieux de travail et de leurs horaires."
@@ -264,6 +271,15 @@ export default function AdminParametresPage() {
                     value={newWorkplaceDescription}
                     onChange={(e) =>
                       setNewWorkplaceDescription(e.target.value)
+                    }
+                  />
+                </Field>
+                <Field label="Code AssociatedAgent (Silwan)">
+                  <input
+                    className={inputClass}
+                    value={newWorkplaceAssociatedAgentCode}
+                    onChange={(e) =>
+                      setNewWorkplaceAssociatedAgentCode(e.target.value)
                     }
                   />
                 </Field>
@@ -371,6 +387,19 @@ export default function AdminParametresPage() {
                             updateWorkplaceDraft(
                               workplace._id,
                               "description",
+                              e.target.value
+                            )
+                          }
+                        />
+                      </Field>
+                      <Field label="Code AssociatedAgent (Silwan)">
+                        <input
+                          className={inputClass}
+                          value={draft.associatedAgentCode}
+                          onChange={(e) =>
+                            updateWorkplaceDraft(
+                              workplace._id,
+                              "associatedAgentCode",
                               e.target.value
                             )
                           }

@@ -61,6 +61,8 @@ export function paymentStatusLabel(status: string) {
       return "Demande";
     case "VALIDE":
       return "Validé";
+    case "A_CONFIRMER":
+      return "À confirmer";
     case "PAYE":
       return "Payé";
     case "REJETE":
@@ -74,7 +76,7 @@ export function statusBadgeClass(status: string) {
   if (["APPROUVE", "CLOTURE", "PAYE", "VALIDE", "present"].includes(status)) {
     return "bg-emerald-50 text-emerald-700";
   }
-  if (["EN_ATTENTE", "DEMANDE", "late", "working"].includes(status)) {
+  if (["EN_ATTENTE", "DEMANDE", "A_CONFIRMER", "late", "working"].includes(status)) {
     return "bg-amber-50 text-amber-700";
   }
   if (["REFUSE", "REJETE", "absent"].includes(status)) {

@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useQuery } from "convex/react";
 import { LogOut, Menu, X } from "lucide-react";
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import { api } from "../../convex/_generated/api";
 import { Logo } from "@/components/Logo";
 import { useAuth } from "@/lib/auth";
@@ -27,9 +27,9 @@ export function Sidebar() {
   );
   if (!user) return null;
 
-  const links =
+  const employeeLinks =
     user.role === "admin"
-      ? ADMIN_PAGES
+      ? []
       : EMPLOYEE_PAGES.filter((page) =>
           canAccessPage(
             user.allowedPages,
@@ -38,6 +38,21 @@ export function Sidebar() {
             user.department
           )
         );
+  const grantedAdminLinks =
+    user.role === "admin"
+      ? []
+      : ADMIN_PAGES.filter((page) =>
+          canAccessPage(
+            user.allowedPages,
+            page.key as PageKey,
+            user.role,
+            user.department
+          )
+        );
+  const links =
+    user.role === "admin"
+      ? ADMIN_PAGES
+      : [...employeeLinks, ...grantedAdminLinks];
 
   async function handleLogout() {
     await logout();
@@ -54,36 +69,44 @@ export function Sidebar() {
         <p className="mb-2 px-3 text-[10px] font-semibold uppercase tracking-[0.16em] text-zinc-500">
           {user.role === "admin" ? "Administration RH" : "Espace employé"}
         </p>
-        {links.map((link) => {
+        {links.map((link, index) => {
           const active =
             pathname === link.href || pathname.startsWith(link.href + "/");
           const Icon = link.icon;
           const pending = pendingBadges?.[link.key] ?? 0;
 
           return (
-            <Link
-              key={link.key}
-              href={link.href}
-              prefetch={false}
-              onClick={() => setOpen(false)}
-              className={`flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors ${
-                active
-                  ? "bg-[#0088E8] text-white"
-                  : "text-zinc-300 hover:bg-white/10 hover:text-white"
-              }`}
-            >
-              <Icon className="h-4 w-4 shrink-0" />
-              <span className="flex min-w-0 flex-1 items-center gap-2">
-                <span className="truncate">{link.label}</span>
-                {pending > 0 ? (
-                  <span
-                    className="h-2 w-2 shrink-0 rounded-full bg-emerald-400"
-                    title={`${pending} en attente`}
-                    aria-label={`${pending} en attente de confirmation`}
-                  />
-                ) : null}
-              </span>
-            </Link>
+            <Fragment key={link.key}>
+              {user.role === "employee" &&
+              grantedAdminLinks.length > 0 &&
+              index === employeeLinks.length ? (
+                <p className="mb-1 mt-4 px-3 text-[10px] font-semibold uppercase tracking-[0.16em] text-zinc-500">
+                  Administration autorisée
+                </p>
+              ) : null}
+              <Link
+                href={link.href}
+                prefetch={false}
+                onClick={() => setOpen(false)}
+                className={`flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors ${
+                  active
+                    ? "bg-[#0088E8] text-white"
+                    : "text-zinc-300 hover:bg-white/10 hover:text-white"
+                }`}
+              >
+                <Icon className="h-4 w-4 shrink-0" />
+                <span className="flex min-w-0 flex-1 items-center gap-2">
+                  <span className="truncate">{link.label}</span>
+                  {pending > 0 ? (
+                    <span
+                      className="h-2 w-2 shrink-0 rounded-full bg-emerald-400"
+                      title={`${pending} en attente`}
+                      aria-label={`${pending} en attente de confirmation`}
+                    />
+                  ) : null}
+                </span>
+              </Link>
+            </Fragment>
           );
         })}
       </nav>

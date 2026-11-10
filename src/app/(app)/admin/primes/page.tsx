@@ -31,6 +31,8 @@ export default function AdminPrimesPage() {
   const [bonusAmount, setBonusAmount] = useState("");
   const [bonusTitle, setBonusTitle] = useState("Prime exceptionnelle");
   const [bonusReason, setBonusReason] = useState("");
+  const [amountDrafts, setAmountDrafts] = useState<Record<string, string>>({});
+  const [bonusDialogOpen, setBonusDialogOpen] = useState(false);
   const [msg, setMsg] = useState("");
   const [error, setError] = useState("");
 
@@ -71,25 +73,59 @@ export default function AdminPrimesPage() {
     [primeRows]
   );
   const pendingTotal = pendingRows.reduce(
-    (sum, row) => sum + (row.calculation?.totalAmount ?? 0),
+    (sum, row) =>
+      sum +
+      (Number(
+        amountDrafts[row.calculation!._id] ??
+          String(row.calculation?.totalAmount ?? 0)
+      ) || 0),
     0
   );
   const rowsToConfirm = pendingRows.filter(
-    (row) => row.calculation?.status === "BROUILLON"
+    (row) =>
+      row.calculation?.status === "BROUILLON" ||
+      (amountDrafts[row.calculation!._id] !== undefined &&
+        Number(amountDrafts[row.calculation!._id]) !==
+          row.calculation?.totalAmount)
   );
 
   async function onConfirmPrimes() {
     if (!token || rowsToConfirm.length === 0) return;
+    const invalidAmount = rowsToConfirm.find((row) => {
+      const value = amountDrafts[row.calculation!._id];
+      return (
+        value !== undefined &&
+        (value.trim() === "" ||
+          !Number.isFinite(Number(value)) ||
+          Number(value) < 0)
+      );
+    });
+    if (invalidAmount) {
+      setError(
+        `Saisissez un montant valide pour ${invalidAmount.employee.name}.`
+      );
+      return;
+    }
     setBusy(true);
     setError("");
     setMsg("");
     try {
       const result = await confirmPrimes({
         token,
-        calculationIds: rowsToConfirm.map(
-          (row) => row.calculation!._id
-        ),
+        calculationIds: rowsToConfirm.map((row) => row.calculation!._id),
+        amountAdjustments: rowsToConfirm.flatMap((row) => {
+          const value = amountDrafts[row.calculation!._id];
+          return value === undefined
+            ? []
+            : [
+                {
+                  calculationId: row.calculation!._id,
+                  amount: Number(value),
+                },
+              ];
+        }),
       });
+      setAmountDrafts({});
       setMsg(
         `${result.confirmed} prime(s) confirmée(s) ou mise(s) à jour pour ${month}/${year}.`
       );
@@ -116,13 +152,16 @@ export default function AdminPrimesPage() {
       setMsg("Prime exceptionnelle attribuée");
       setBonusAmount("");
       setBonusReason("");
+      setBonusEmployeeId("");
+      setBonusTitle("Prime exceptionnelle");
+      setBonusDialogOpen(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Erreur");
     }
   }
 
   return (
-    <RequireAuth role="admin">
+    <RequireAuth page="admin-primes">
       <PageShell
         title="Primes"
         description="Vérifiez et confirmez les primes calculées selon la base, la réalisation, le recouvrement et l’évaluation de chaque employé."
@@ -130,12 +169,15 @@ export default function AdminPrimesPage() {
         {msg ? <p className="mb-4 text-sm text-emerald-600">{msg}</p> : null}
         {error ? <p className="mb-4 text-sm text-red-600">{error}</p> : null}
 
-        <div className="mb-4 flex flex-wrap gap-3">
+        <div className="mb-4 flex flex-wrap items-end gap-3">
           <Field label="Mois">
             <select
               className={inputClass}
               value={month}
-              onChange={(e) => setMonth(Number(e.target.value))}
+              onChange={(e) => {
+                setAmountDrafts({});
+                setMonth(Number(e.target.value));
+              }}
             >
               {Array.from({ length: 12 }, (_, i) => (
                 <option key={i + 1} value={i + 1}>
@@ -151,9 +193,19 @@ export default function AdminPrimesPage() {
               type="number"
               className={inputClass + " w-28"}
               value={year}
-              onChange={(e) => setYear(Number(e.target.value))}
+              onChange={(e) => {
+                setAmountDrafts({});
+                setYear(Number(e.target.value));
+              }}
             />
           </Field>
+          <PrimaryButton
+            type="button"
+            className="ml-auto"
+            onClick={() => setBonusDialogOpen(true)}
+          >
+            Attribuer une prime exceptionnelle
+          </PrimaryButton>
         </div>
 
         <Card className="mb-6">
@@ -167,7 +219,9 @@ export default function AdminPrimesPage() {
               reprennent ceux du manager. Le recouvrement du lieu s&apos;applique
               uniquement au département « resposible showroom ». Ces calculs
               sont préparés automatiquement. Les calculs confirmés restent ici
-              pour être modifiés puis confirmés à nouveau.
+              pour être modifiés puis confirmés à nouveau. Vous pouvez ajuster
+              directement le montant de la prime calculée; la modification est
+              appliquée lors de la confirmation.
             </p>
           </div>
 
@@ -229,7 +283,22 @@ export default function AdminPrimesPage() {
                         {moneyDZD(calc.evaluationAmount)}
                       </td>
                       <td className="py-3 pr-3 text-right font-semibold">
-                        {moneyDZD(calc.totalAmount)}
+                        <input
+                          type="number"
+                          min={0}
+                          step={1}
+                          aria-label={`Montant de la prime de ${row.employee.name}`}
+                          className="w-32 rounded-lg border border-zinc-200 px-2 py-1.5 text-right font-semibold"
+                          value={
+                            amountDrafts[calc._id] ?? String(calc.totalAmount)
+                          }
+                          onChange={(event) =>
+                            setAmountDrafts((previous) => ({
+                              ...previous,
+                              [calc._id]: event.target.value,
+                            }))
+                          }
+                        />
                       </td>
                       <td className="py-3 text-right">
                         <Badge
@@ -239,9 +308,15 @@ export default function AdminPrimesPage() {
                               : "bg-amber-100 text-amber-800"
                           }
                         >
-                          {calc.status === "CONFIRME"
+                          {calc.status === "CONFIRME" &&
+                          !rowsToConfirm.some(
+                            (pendingRow) =>
+                              pendingRow.calculation?._id === calc._id
+                          )
                             ? "Confirmée"
-                            : "À confirmer"}
+                            : calc.status === "CONFIRME"
+                              ? "Modification à confirmer"
+                              : "À confirmer"}
                         </Badge>
                       </td>
                     </tr>
@@ -272,65 +347,107 @@ export default function AdminPrimesPage() {
             >
               {busy
                 ? "Confirmation…"
-                : `Confirmer les modifications (${month}/${year})`}
+                : `Confirmer les modifications (${rowsToConfirm.length})`}
             </PrimaryButton>
           </div>
         </Card>
 
-        <Card className="mb-6">
-          <h2 className="font-semibold text-zinc-900">
-            Attribuer une prime exceptionnelle
-          </h2>
-          <form onSubmit={onBonus} className="mt-4 grid gap-3 md:grid-cols-2">
-            <Field label="Employé">
-              <select
-                required
-                className={inputClass}
-                value={bonusEmployeeId}
-                onChange={(e) => setBonusEmployeeId(e.target.value)}
-              >
-                <option value="">Choisir…</option>
-                {(employees ?? [])
-                  .filter((employee) => employee.isActive)
-                  .map((employee) => (
-                    <option key={employee._id} value={employee._id}>
-                      {employee.name}
-                    </option>
-                  ))}
-              </select>
-            </Field>
-            <Field label="Titre">
-              <input
-                required
-                className={inputClass}
-                value={bonusTitle}
-                onChange={(e) => setBonusTitle(e.target.value)}
-              />
-            </Field>
-            <Field label="Montant">
-              <input
-                required
-                type="number"
-                min={0}
-                className={inputClass}
-                value={bonusAmount}
-                onChange={(e) => setBonusAmount(e.target.value)}
-              />
-            </Field>
-            <Field label="Motif">
-              <textarea
-                required
-                className={inputClass}
-                rows={1}
-                value={bonusReason}
-                onChange={(e) => setBonusReason(e.target.value)}
-              />
-            </Field>
-            <div className="md:col-span-2">
-              <PrimaryButton type="submit">Attribuer la prime</PrimaryButton>
+        {bonusDialogOpen ? (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+            onMouseDown={(event) => {
+              if (event.target === event.currentTarget) {
+                setBonusDialogOpen(false);
+              }
+            }}
+          >
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="bonus-dialog-title"
+            >
+              <Card className="w-full max-w-2xl">
+                <div className="flex items-start justify-between gap-4">
+                  <h2
+                    id="bonus-dialog-title"
+                    className="font-semibold text-zinc-900"
+                  >
+                    Attribuer une prime exceptionnelle
+                  </h2>
+                  <button
+                    type="button"
+                    aria-label="Fermer"
+                    className="rounded-lg px-2 py-1 text-zinc-500 hover:bg-zinc-100"
+                    onClick={() => setBonusDialogOpen(false)}
+                  >
+                    ×
+                  </button>
+                </div>
+                <form
+                  onSubmit={onBonus}
+                  className="mt-4 grid gap-3 md:grid-cols-2"
+                >
+                  <Field label="Employé">
+                    <select
+                      required
+                      className={inputClass}
+                      value={bonusEmployeeId}
+                      onChange={(e) => setBonusEmployeeId(e.target.value)}
+                    >
+                      <option value="">Choisir…</option>
+                      {(employees ?? [])
+                        .filter((employee) => employee.isActive)
+                        .map((employee) => (
+                          <option key={employee._id} value={employee._id}>
+                            {employee.name}
+                          </option>
+                        ))}
+                    </select>
+                  </Field>
+                  <Field label="Titre">
+                    <input
+                      required
+                      className={inputClass}
+                      value={bonusTitle}
+                      onChange={(e) => setBonusTitle(e.target.value)}
+                    />
+                  </Field>
+                  <Field label="Montant">
+                    <input
+                      required
+                      type="number"
+                      min={0}
+                      className={inputClass}
+                      value={bonusAmount}
+                      onChange={(e) => setBonusAmount(e.target.value)}
+                    />
+                  </Field>
+                  <Field label="Motif">
+                    <textarea
+                      required
+                      className={inputClass}
+                      rows={1}
+                      value={bonusReason}
+                      onChange={(e) => setBonusReason(e.target.value)}
+                    />
+                  </Field>
+                  <div className="flex justify-end gap-2 md:col-span-2">
+                    <button
+                      type="button"
+                      className="rounded-xl border border-zinc-200 px-4 py-2 text-sm font-semibold text-zinc-700 hover:bg-zinc-50"
+                      onClick={() => setBonusDialogOpen(false)}
+                    >
+                      Annuler
+                    </button>
+                    <PrimaryButton type="submit">
+                      Attribuer la prime
+                    </PrimaryButton>
+                  </div>
+                </form>
+              </Card>
             </div>
-          </form>
-        </Card>
+          </div>
+        ) : null}
 
         <h3 className="mb-3 font-semibold text-zinc-900">Primes attribuées</h3>
         <Card>

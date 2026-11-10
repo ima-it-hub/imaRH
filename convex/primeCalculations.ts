@@ -1,7 +1,14 @@
 import { mutation, query, MutationCtx, QueryCtx } from "./_generated/server";
 import { v } from "convex/values";
 import { Doc, Id } from "./_generated/dataModel";
-import { computeBasePrime, notify, publicUser, requireAdmin } from "./lib";
+import {
+  computeBasePrime,
+  departmentPrimeWeights,
+  notify,
+  publicUser,
+  requireAdminAnyPage,
+  requireAdminPage,
+} from "./lib";
 
 async function evaluationPercentForMonth(
   ctx: QueryCtx | MutationCtx,
@@ -16,6 +23,66 @@ async function evaluationPercentForMonth(
     )
     .unique();
   return report?.percentage ?? 0;
+}
+
+async function primeWeightsForEmployee(
+  ctx: QueryCtx | MutationCtx,
+  employee: Doc<"users">
+) {
+  const department = employee.departmentId
+    ? await ctx.db.get(employee.departmentId)
+    : null;
+  return departmentPrimeWeights(department);
+}
+
+async function companyRealisationRatioForMonth(
+  ctx: QueryCtx | MutationCtx,
+  year: number,
+  month: number
+): Promise<number | null> {
+  const [workplaces, metrics, syncs] = await Promise.all([
+    ctx.db.query("workplaces").collect(),
+    ctx.db
+      .query("workplacePrimeMetrics")
+      .withIndex("by_period", (q) => q.eq("year", year).eq("month", month))
+      .collect(),
+    ctx.db
+      .query("silwanRealisationSyncs")
+      .withIndex("by_period", (q) => q.eq("year", year).eq("month", month))
+      .collect(),
+  ]);
+  const centralWorkplace = workplaces.find(
+    (workplace) =>
+      workplace.name.trim().toLocaleUpperCase("fr-DZ") === "BEN ZARGA"
+  );
+  if (!centralWorkplace) return null;
+
+  const metric = metrics.find(
+    (entry) => entry.workplaceId === centralWorkplace._id
+  );
+  if (!metric || metric.objective <= 0) return null;
+  const sync = syncs.find(
+    (entry) =>
+      entry.ownerType === "workplace" &&
+      entry.workplaceId === centralWorkplace._id
+  );
+  const realisation =
+    sync && sync.updatedAt > metric.updatedAt
+      ? sync.realisation
+      : metric.realisation;
+  return Math.max(0, realisation) / metric.objective;
+}
+
+function requiredCompanyRealisationRatio(
+  ratio: number | null,
+  companyRealisationWeightPercent: number
+) {
+  if (ratio === null && companyRealisationWeightPercent > 0) {
+    throw new Error(
+      "Saisissez un objectif de réalisation mensuel pour le lieu BEN ZARGA avant de calculer la prime entreprise"
+    );
+  }
+  return ratio ?? 0;
 }
 
 function isShowroomResponsible(department?: string) {
@@ -59,6 +126,7 @@ async function upsertInheritedDraft(
     sourceWorkplaceId?: Id<"workplaces">;
     applyRecoveryAdjustment: boolean;
   },
+  companyRealisationRatio: number | null,
   now: number
 ) {
   const evaluationPercent = await evaluationPercentForMonth(
@@ -67,14 +135,21 @@ async function upsertInheritedDraft(
     args.year,
     args.month
   );
+  const primeWeights = await primeWeightsForEmployee(ctx, employee);
+  const effectiveCompanyRealisationRatio = requiredCompanyRealisationRatio(
+    companyRealisationRatio,
+    primeWeights.companyRealisationWeightPercent
+  );
   const computed = computeBasePrime({
     basePrime: employee.baseBonus ?? 0,
     objective: source.objective,
     realisation: source.realisation,
+    companyRealisationRatio: effectiveCompanyRealisationRatio,
     recoveryObjective: source.recoveryObjective ?? 0,
     recouvrement: source.recouvrement ?? 0,
     evaluationPercent,
     applyRecoveryAdjustment: source.applyRecoveryAdjustment,
+    ...primeWeights,
   });
   const payload = {
     employeeId: employee._id,
@@ -88,6 +163,7 @@ async function upsertInheritedDraft(
     sourceManagerId: source.sourceManagerId,
     sourceWorkplaceId: source.sourceWorkplaceId,
     ...computed,
+    adminAdjustedAmount: undefined,
     calculationVersion: 2,
     status: "BROUILLON" as const,
     updatedAt: now,
@@ -113,7 +189,10 @@ export const employeesForMonth = query({
     year: v.number(),
   },
   handler: async (ctx, args) => {
-    await requireAdmin(ctx, args.token);
+    await requireAdminAnyPage(ctx, args.token, [
+      "admin-primes",
+      "admin-calcul-primes",
+    ]);
     const users = await ctx.db.query("users").collect();
     const employees = users.filter(
       (user) =>
@@ -132,6 +211,12 @@ export const employeesForMonth = query({
     );
     const calculations = await ctx.db
       .query("primeCalculations")
+      .withIndex("by_period", (q) =>
+        q.eq("year", args.year).eq("month", args.month)
+      )
+      .collect();
+    const silwanSyncs = await ctx.db
+      .query("silwanRealisationSyncs")
       .withIndex("by_period", (q) =>
         q.eq("year", args.year).eq("month", args.month)
       )
@@ -156,6 +241,11 @@ export const employeesForMonth = query({
         calculation.employeeId,
         calculation,
       ])
+    );
+    const silwanByEmployee = new Map(
+      silwanSyncs
+        .filter((sync) => sync.ownerType === "employee" && sync.employeeId)
+        .map((sync) => [sync.employeeId!, sync])
     );
     const previousCalculationByEmployee = new Map(
       previousCalculations.map((calculation) => [
@@ -184,6 +274,8 @@ export const employeesForMonth = query({
       const previousEmployeeCalculation = previousCalculationByEmployee.get(
         employee._id
       );
+      const currentCalculation = calculationByEmployee.get(employee._id);
+      const silwanSync = silwanByEmployee.get(employee._id);
       const previousWorkplaceMetric = employee.workplaceId
         ? previousMetricByWorkplace.get(employee.workplaceId)
         : undefined;
@@ -247,7 +339,19 @@ export const employeesForMonth = query({
         previousMonthRecoveryObjective:
           previousRecoveryDefaults.find((value) => value !== null) ?? null,
         previousMonthObjective,
-        calculation: calculationByEmployee.get(employee._id) ?? null,
+        calculation: currentCalculation ?? null,
+        silwanRealisation:
+          silwanSync &&
+          (!currentCalculation ||
+            silwanSync.updatedAt > currentCalculation.updatedAt)
+            ? silwanSync.realisation
+            : null,
+        silwanRecouvrement:
+          silwanSync &&
+          (!currentCalculation ||
+            silwanSync.updatedAt > currentCalculation.updatedAt)
+            ? silwanSync.recouvrement ?? null
+            : null,
         evaluationPercent: await evaluationPercentForMonth(
           ctx,
           employee._id,
@@ -273,11 +377,17 @@ export const workplaceMetricsForMonth = query({
     year: v.number(),
   },
   handler: async (ctx, args) => {
-    await requireAdmin(ctx, args.token);
-    const [workplaces, metrics] = await Promise.all([
+    await requireAdminPage(ctx, args.token, "admin-calcul-primes");
+    const [workplaces, metrics, silwanSyncs] = await Promise.all([
       ctx.db.query("workplaces").collect(),
       ctx.db
         .query("workplacePrimeMetrics")
+        .withIndex("by_period", (q) =>
+          q.eq("year", args.year).eq("month", args.month)
+        )
+        .collect(),
+      ctx.db
+        .query("silwanRealisationSyncs")
         .withIndex("by_period", (q) =>
           q.eq("year", args.year).eq("month", args.month)
         )
@@ -293,27 +403,215 @@ export const workplaceMetricsForMonth = query({
     const metricByWorkplace = new Map(
       metrics.map((metric) => [metric.workplaceId, metric])
     );
+    const silwanByWorkplace = new Map(
+      silwanSyncs
+        .filter((sync) => sync.ownerType === "workplace" && sync.workplaceId)
+        .map((sync) => [sync.workplaceId!, sync])
+    );
     const previousMetricByWorkplace = new Map(
       previousMetrics.map((metric) => [metric.workplaceId, metric])
     );
     return workplaces
-      .map((workplace) => ({
-        workplace,
-        metrics: metricByWorkplace.get(workplace._id) ?? null,
-        previousMonthObjective:
-          previousMetricByWorkplace.get(workplace._id)?.objective ?? null,
-        previousMonthRecoveryObjective: (() => {
-          const previousMetric = previousMetricByWorkplace.get(workplace._id);
-          return previousMetric
-            ? carryForwardRecoveryObjective(
-                previousMetric.realisation,
-                previousMetric.recoveryObjective,
-                previousMetric.recouvrement
-              )
-            : null;
-        })(),
-      }))
+      .map((workplace) => {
+        const metric = metricByWorkplace.get(workplace._id);
+        const silwanSync = silwanByWorkplace.get(workplace._id);
+        return {
+          workplace,
+          metrics: metric ?? null,
+          silwanRealisation:
+            silwanSync && (!metric || silwanSync.updatedAt > metric.updatedAt)
+              ? silwanSync.realisation
+              : null,
+          silwanRecouvrement:
+            silwanSync && (!metric || silwanSync.updatedAt > metric.updatedAt)
+              ? silwanSync.recouvrement ?? null
+              : null,
+          previousMonthObjective:
+            previousMetricByWorkplace.get(workplace._id)?.objective ?? null,
+          previousMonthRecoveryObjective: (() => {
+            const previousMetric = previousMetricByWorkplace.get(workplace._id);
+            return previousMetric
+              ? carryForwardRecoveryObjective(
+                  previousMetric.realisation,
+                  previousMetric.recoveryObjective,
+                  previousMetric.recouvrement
+                )
+              : null;
+          })(),
+        };
+      })
       .sort((a, b) => a.workplace.name.localeCompare(b.workplace.name));
+  },
+});
+
+export const saveSilwanRealisations = mutation({
+  args: {
+    token: v.string(),
+    month: v.number(),
+    year: v.number(),
+    employeeEntries: v.array(
+      v.object({
+        employeeId: v.id("users"),
+        associatedAgentCode: v.string(),
+        realisation: v.number(),
+        recouvrement: v.number(),
+      })
+    ),
+    workplaceEntries: v.array(
+      v.object({
+        workplaceId: v.id("workplaces"),
+        associatedAgentCode: v.optional(v.string()),
+        allDocuments: v.optional(v.boolean()),
+        realisation: v.number(),
+        recouvrement: v.number(),
+      })
+    ),
+  },
+  handler: async (ctx, args) => {
+    const admin = await requireAdminPage(ctx, args.token, "admin-calcul-primes");
+    if (
+      !Number.isInteger(args.month) ||
+      args.month < 1 ||
+      args.month > 12 ||
+      !Number.isInteger(args.year)
+    ) {
+      throw new Error("Période de réalisation invalide");
+    }
+
+    const entries = [
+      ...args.employeeEntries.map((entry) => ({
+        ownerType: "employee" as const,
+        employeeId: entry.employeeId,
+        associatedAgentCode: entry.associatedAgentCode.trim(),
+        allDocuments: false,
+        realisation: entry.realisation,
+        recouvrement: entry.recouvrement,
+      })),
+      ...args.workplaceEntries.map((entry) => ({
+        ownerType: "workplace" as const,
+        workplaceId: entry.workplaceId,
+        associatedAgentCode: entry.associatedAgentCode?.trim() || undefined,
+        allDocuments: entry.allDocuments === true,
+        realisation: entry.realisation,
+        recouvrement: entry.recouvrement,
+      })),
+    ];
+    const uniqueKeys = new Set(
+      entries.map((entry) =>
+        entry.ownerType === "employee"
+          ? `employee:${entry.employeeId}`
+          : `workplace:${entry.workplaceId}`
+      )
+    );
+    if (uniqueKeys.size !== entries.length) {
+      throw new Error("Une réalisation est fournie plusieurs fois");
+    }
+
+    const now = Date.now();
+    for (const entry of entries) {
+      if (
+        (entry.ownerType === "employee" && !entry.associatedAgentCode) ||
+        (entry.ownerType === "workplace" &&
+          !entry.allDocuments &&
+          !entry.associatedAgentCode) ||
+        !Number.isFinite(entry.realisation) ||
+        entry.realisation < 0 ||
+        !Number.isFinite(entry.recouvrement)
+      ) {
+        throw new Error("Code ou montant de réalisation invalide");
+      }
+
+      let existing: Doc<"silwanRealisationSyncs"> | null;
+      if (entry.ownerType === "employee") {
+        if (!entry.associatedAgentCode) {
+          throw new Error("Code AssociatedAgent employé invalide");
+        }
+        const employee = await ctx.db.get(entry.employeeId);
+        if (
+          !employee ||
+          employee.role !== "employee" ||
+          !employee.isActive ||
+          employee.resignedAt
+        ) {
+          throw new Error("Employé introuvable ou inactif");
+        }
+        if (
+          employee.associatedAgentCode?.trim() !== entry.associatedAgentCode
+        ) {
+          throw new Error(
+            "Le code AssociatedAgent a changé. Rechargez la page."
+          );
+        }
+        existing = await ctx.db
+          .query("silwanRealisationSyncs")
+          .withIndex("by_employee_period", (q) =>
+            q
+              .eq("employeeId", entry.employeeId)
+              .eq("year", args.year)
+              .eq("month", args.month)
+          )
+          .unique();
+      } else {
+        const workplace = await ctx.db.get(entry.workplaceId);
+        const isCentralWorkplace =
+          workplace?.name.trim().toLocaleUpperCase("fr-DZ") === "BEN ZARGA";
+        if (!workplace) {
+          throw new Error("Lieu de travail introuvable");
+        }
+        if (
+          entry.allDocuments
+            ? !isCentralWorkplace || Boolean(entry.associatedAgentCode)
+            : !entry.associatedAgentCode ||
+              workplace.associatedAgentCode?.trim() !== entry.associatedAgentCode
+        ) {
+          throw new Error(
+            "Le code AssociatedAgent a changé. Rechargez la page."
+          );
+        }
+        existing = await ctx.db
+          .query("silwanRealisationSyncs")
+          .withIndex("by_workplace_period", (q) =>
+            q
+              .eq("workplaceId", entry.workplaceId)
+              .eq("year", args.year)
+              .eq("month", args.month)
+          )
+          .unique();
+      }
+      const allDocuments =
+        entry.ownerType === "workplace" && entry.allDocuments;
+      const entryPayload =
+        entry.ownerType === "employee"
+          ? {
+              ownerType: entry.ownerType,
+              employeeId: entry.employeeId,
+              associatedAgentCode: entry.associatedAgentCode,
+            }
+          : {
+              ownerType: entry.ownerType,
+              workplaceId: entry.workplaceId,
+              associatedAgentCode: entry.associatedAgentCode,
+            };
+      const payload = {
+        ...entryPayload,
+        month: args.month,
+        year: args.year,
+        realisation: Math.round(entry.realisation * 100) / 100,
+        recouvrement: Math.round(entry.recouvrement * 100) / 100,
+        sourceType: allDocuments
+          ? ("central_total" as const)
+          : ("associated_agent" as const),
+        updatedAt: now,
+        updatedBy: admin._id,
+      };
+      if (existing) {
+        await ctx.db.patch(existing._id, payload);
+      } else {
+        await ctx.db.insert("silwanRealisationSyncs", payload);
+      }
+    }
+
+    return { saved: entries.length };
   },
 });
 
@@ -324,7 +622,7 @@ export const syncInheritedDrafts = mutation({
     year: v.number(),
   },
   handler: async (ctx, args) => {
-    await requireAdmin(ctx, args.token);
+    await requireAdminPage(ctx, args.token, "admin-primes");
     const employees = (await ctx.db.query("users").collect()).filter(
       (user) =>
         user.role === "employee" &&
@@ -352,6 +650,11 @@ export const syncInheritedDrafts = mutation({
       .collect();
     const metricsByWorkplace = new Map(
       workplaceMetrics.map((metric) => [metric.workplaceId, metric])
+    );
+    const companyRealisationRatio = await companyRealisationRatioForMonth(
+      ctx,
+      args.year,
+      args.month
     );
     let prepared = 0;
     const now = Date.now();
@@ -431,6 +734,7 @@ export const syncInheritedDrafts = mutation({
         args,
         existing,
         source,
+        companyRealisationRatio,
         now
       );
       calculationByEmployee.set(employee._id, updated);
@@ -467,7 +771,7 @@ export const saveDrafts = mutation({
     ),
   },
   handler: async (ctx, args) => {
-    const admin = await requireAdmin(ctx, args.token);
+    const admin = await requireAdminPage(ctx, args.token, "admin-calcul-primes");
 
     const selectedIds = new Set(args.selectedEmployeeIds);
     if (selectedIds.size !== args.selectedEmployeeIds.length) {
@@ -572,8 +876,7 @@ export const saveDrafts = mutation({
         (hasRecoveryObjective &&
           (!Number.isFinite(entry.recoveryObjective) ||
             entry.recoveryObjective! <= 0 ||
-            !Number.isFinite(entry.recouvrement) ||
-            entry.recouvrement! < 0))
+            !Number.isFinite(entry.recouvrement)))
       ) {
         throw new Error(
           "Saisissez un objectif de recouvrement positif et son montant réalisé, ou laissez les deux vides"
@@ -613,6 +916,11 @@ export const saveDrafts = mutation({
       }
     }
 
+    const companyRealisationRatio = await companyRealisationRatioForMonth(
+      ctx,
+      args.year,
+      args.month
+    );
     const changedMetricOwnerIds = new Set<Id<"users">>();
     for (const entry of args.entries) {
       const employee = employeeById.get(entry.employeeId);
@@ -633,7 +941,6 @@ export const saveDrafts = mutation({
       if (
         entry.realisation < 0 ||
         entry.recoveryObjective < 0 ||
-        entry.recouvrement < 0 ||
         !Number.isFinite(entry.objective) ||
         !Number.isFinite(entry.realisation) ||
         !Number.isFinite(entry.recoveryObjective) ||
@@ -660,14 +967,21 @@ export const saveDrafts = mutation({
         args.year,
         args.month
       );
+      const primeWeights = await primeWeightsForEmployee(ctx, employee);
+      const effectiveCompanyRealisationRatio = requiredCompanyRealisationRatio(
+        companyRealisationRatio,
+        primeWeights.companyRealisationWeightPercent
+      );
       const computed = computeBasePrime({
         basePrime: employee.role === "employee" ? employee.baseBonus ?? 0 : 0,
         objective: entry.objective,
         realisation: entry.realisation,
+        companyRealisationRatio: effectiveCompanyRealisationRatio,
         recoveryObjective: entry.recoveryObjective,
         recouvrement: entry.recouvrement,
         evaluationPercent,
         applyRecoveryAdjustment: employee.role === "employee",
+        ...primeWeights,
       });
       const inputsUnchanged =
         existing?.status === "CONFIRME" &&
@@ -676,7 +990,15 @@ export const saveDrafts = mutation({
         existing.realisation === entry.realisation &&
         existing.recoveryObjective === entry.recoveryObjective &&
         existing.recouvrement === entry.recouvrement &&
-        existing.evaluationPercent === computed.evaluationPercent;
+        existing.evaluationPercent === computed.evaluationPercent &&
+        existing.companyRealisationRatio ===
+          computed.companyRealisationRatio &&
+        existing.objectiveWeightPercent ===
+          computed.objectiveWeightPercent &&
+        existing.evaluationWeightPercent ===
+          computed.evaluationWeightPercent &&
+        existing.companyRealisationWeightPercent ===
+          computed.companyRealisationWeightPercent;
       const payload = {
         employeeId: employee._id,
         month: args.month,
@@ -689,6 +1011,14 @@ export const saveDrafts = mutation({
         sourceManagerId: undefined,
         sourceWorkplaceId: undefined,
         ...computed,
+        adminAdjustedAmount:
+          inputsUnchanged && existing?.adminAdjustedAmount !== undefined
+            ? existing.adminAdjustedAmount
+            : undefined,
+        totalAmount:
+          inputsUnchanged && existing?.adminAdjustedAmount !== undefined
+            ? existing.adminAdjustedAmount
+            : computed.totalAmount,
         calculationVersion: 2,
         status: inputsUnchanged ? ("CONFIRME" as const) : ("BROUILLON" as const),
         updatedAt: now,
@@ -718,6 +1048,8 @@ export const saveDrafts = mutation({
         const demoted = {
           ...existing,
           hasOwnMetrics: false,
+          adminAdjustedAmount: undefined,
+          totalAmount: existing.totalAmount,
           status: "BROUILLON" as const,
           sourceManagerId: undefined,
           sourceWorkplaceId: undefined,
@@ -725,6 +1057,7 @@ export const saveDrafts = mutation({
         };
         await ctx.db.patch(existing._id, {
           hasOwnMetrics: false,
+          adminAdjustedAmount: undefined,
           status: "BROUILLON",
           sourceManagerId: undefined,
           sourceWorkplaceId: undefined,
@@ -738,13 +1071,25 @@ export const saveDrafts = mutation({
       if (selectedIds.has(employee._id)) continue;
 
       const existing = calculationByEmployee.get(employee._id);
+      const primeWeights = await primeWeightsForEmployee(ctx, employee);
       const confirmedSourceChanged =
         existing?.status === "CONFIRME" &&
         existing.hasOwnMetrics === false &&
         ((existing.sourceWorkplaceId !== undefined &&
           changedWorkplaceIds.has(existing.sourceWorkplaceId)) ||
           (existing.sourceManagerId !== undefined &&
-            changedMetricOwnerIds.has(existing.sourceManagerId)));
+            changedMetricOwnerIds.has(existing.sourceManagerId)) ||
+          existing.objectiveWeightPercent !==
+            primeWeights.realisationWeightPercent ||
+          existing.evaluationWeightPercent !==
+            primeWeights.evaluationWeightPercent ||
+          existing.companyRealisationWeightPercent !==
+            primeWeights.companyRealisationWeightPercent ||
+          existing.companyRealisationRatio !==
+            requiredCompanyRealisationRatio(
+              companyRealisationRatio,
+              primeWeights.companyRealisationWeightPercent
+            ));
       if (existing?.status === "CONFIRME" && !confirmedSourceChanged) continue;
       if ((employee.baseBonus ?? 0) <= 0) {
         if (existing) {
@@ -820,6 +1165,7 @@ export const saveDrafts = mutation({
         args,
         existing,
         source,
+        companyRealisationRatio,
         now
       );
       calculationByEmployee.set(employee._id, updated);
@@ -850,14 +1196,51 @@ export const confirmBatch = mutation({
   args: {
     token: v.string(),
     calculationIds: v.array(v.id("primeCalculations")),
+    amountAdjustments: v.optional(
+      v.array(
+        v.object({
+          calculationId: v.id("primeCalculations"),
+          amount: v.number(),
+        })
+      )
+    ),
   },
   handler: async (ctx, args) => {
-    const admin = await requireAdmin(ctx, args.token);
+    const admin = await requireAdminPage(ctx, args.token, "admin-primes");
+    const calculationIds = new Set(args.calculationIds);
+    const adjustmentByCalculation = new Map(
+      (args.amountAdjustments ?? []).map((adjustment) => [
+        adjustment.calculationId,
+        adjustment.amount,
+      ])
+    );
+    if (
+      adjustmentByCalculation.size !== (args.amountAdjustments ?? []).length ||
+      [...adjustmentByCalculation.keys()].some(
+        (id) => !calculationIds.has(id)
+      )
+    ) {
+      throw new Error("Les montants modifiés ne correspondent pas aux primes");
+    }
+    for (const amount of adjustmentByCalculation.values()) {
+      if (!Number.isFinite(amount) || amount < 0) {
+        throw new Error("Le montant d'une prime doit être positif ou nul");
+      }
+    }
     let confirmed = 0;
+    const companyRatioByPeriod = new Map<string, number | null>();
 
     for (const calculationId of args.calculationIds) {
       const row = await ctx.db.get(calculationId);
-      if (!row || row.status === "CONFIRME") continue;
+      const adjustedAmount = adjustmentByCalculation.get(calculationId);
+      if (
+        !row ||
+        (row.status === "CONFIRME" &&
+          (adjustedAmount === undefined ||
+            adjustedAmount === row.totalAmount))
+      ) {
+        continue;
+      }
       if (row.calculationVersion !== 2) {
         throw new Error("Recalculez cette prime avec la nouvelle formule");
       }
@@ -890,15 +1273,34 @@ export const confirmBatch = mutation({
         row.year,
         row.month
       );
+      const periodKey = `${row.year}-${row.month}`;
+      if (!companyRatioByPeriod.has(periodKey)) {
+        companyRatioByPeriod.set(
+          periodKey,
+          await companyRealisationRatioForMonth(ctx, row.year, row.month)
+        );
+      }
+      const primeWeights = await primeWeightsForEmployee(ctx, employee);
+      const companyRealisationRatio = requiredCompanyRealisationRatio(
+        companyRatioByPeriod.get(periodKey) ?? null,
+        primeWeights.companyRealisationWeightPercent
+      );
       const computed = computeBasePrime({
         basePrime: employee.baseBonus ?? 0,
         objective: row.objective,
         realisation: row.realisation,
+        companyRealisationRatio,
         recoveryObjective: row.recoveryObjective ?? 0,
         recouvrement: row.recouvrement,
         evaluationPercent,
         applyRecoveryAdjustment,
+        ...primeWeights,
       });
+      const finalComputed = {
+        ...computed,
+        totalAmount:
+          adjustedAmount ?? row.adminAdjustedAmount ?? computed.totalAmount,
+      };
 
       const sourceManager = row.sourceManagerId
         ? await ctx.db.get(row.sourceManagerId)
@@ -910,6 +1312,11 @@ export const confirmBatch = mutation({
       const reason = [
         `Base ${computed.primeBase.toLocaleString("fr-DZ")} DZD`,
         `Réalisation ${(computed.objectiveRatio * 100).toFixed(1)}% → ${computed.objectiveAmount.toLocaleString("fr-DZ")}`,
+        ...(computed.companyRealisationWeightPercent > 0
+          ? [
+              `Réalisation entreprise ${(computed.companyRealisationRatio * 100).toFixed(1)}% → ${computed.companyRealisationAmount.toLocaleString("fr-DZ")}`,
+            ]
+          : []),
         ...(applyRecoveryAdjustment
           ? [
               `Recouvrement ${(computed.recoveryRatio * 100).toFixed(1)}% → ${computed.recoveryAmount.toLocaleString("fr-DZ")}`,
@@ -922,13 +1329,18 @@ export const confirmBatch = mutation({
                 `Objectif et réalisation du manager ${sourceManager?.name ?? ""}`,
               ]),
         `Évaluation ${computed.evaluationPercent}% → ${computed.evaluationAmount.toLocaleString("fr-DZ")}`,
+        ...(finalComputed.totalAmount !== computed.totalAmount
+          ? [
+              `Montant ajusté par l'admin : ${finalComputed.totalAmount.toLocaleString("fr-DZ")} DZD`,
+            ]
+          : []),
       ].join(" · ");
 
       let bonusId = row.bonusId;
-      if (computed.totalAmount > 0) {
+      if (finalComputed.totalAmount > 0) {
         if (bonusId && (await ctx.db.get(bonusId))) {
           await ctx.db.patch(bonusId, {
-            amount: computed.totalAmount,
+            amount: finalComputed.totalAmount,
             title,
             reason,
             attributedAt: Date.now(),
@@ -938,7 +1350,7 @@ export const confirmBatch = mutation({
         } else {
           bonusId = await ctx.db.insert("bonuses", {
             employeeId: row.employeeId,
-            amount: computed.totalAmount,
+            amount: finalComputed.totalAmount,
             title,
             reason,
             attributedAt: Date.now(),
@@ -952,10 +1364,12 @@ export const confirmBatch = mutation({
       }
 
       await ctx.db.patch(calculationId, {
-        ...computed,
+        ...finalComputed,
+        adminAdjustedAmount:
+          adjustedAmount ?? row.adminAdjustedAmount ?? undefined,
         calculationVersion: 2,
         status: "CONFIRME",
-        bonusId: computed.totalAmount > 0 ? bonusId : undefined,
+        bonusId: finalComputed.totalAmount > 0 ? bonusId : undefined,
         confirmedAt: Date.now(),
         confirmedBy: admin._id,
         updatedAt: Date.now(),
@@ -965,7 +1379,7 @@ export const confirmBatch = mutation({
         ctx,
         row.employeeId,
         "Prime mensuelle confirmée",
-        `${computed.totalAmount.toLocaleString("fr-DZ")} DZD ajoutés à votre solde pour ${row.month}/${row.year}.`
+        `${finalComputed.totalAmount.toLocaleString("fr-DZ")} DZD ajoutés à votre solde pour ${row.month}/${row.year}.`
       );
       confirmed += 1;
     }

@@ -22,10 +22,10 @@ import {
   paymentStatusLabel,
   statusBadgeClass,
 } from "@/lib/format";
-import { printFinanceHistory } from "@/lib/pdfExport";
+import { printFinanceHistory, printPaymentReceipt } from "@/lib/pdfExport";
 
 export default function AdminOrdresPaiementPage() {
-  const { token } = useAuth();
+  const { token, user } = useAuth();
   const employees = useQuery(
     api.users.listEmployees,
     token ? { token } : "skip"
@@ -118,7 +118,9 @@ export default function AdminOrdresPaiementPage() {
         token,
         orderIds: selectedPendingOrderIds,
       });
-      setMsg(`${result.validated} demande(s) validée(s).`);
+      setMsg(
+        `${result.validated} demande(s) validée(s) — en attente de confirmation par les employés.`
+      );
       setSelectedOrderIds(new Set());
     } catch (err) {
       setError(err instanceof Error ? err.message : "Erreur");
@@ -139,7 +141,7 @@ export default function AdminOrdresPaiementPage() {
 
   async function onTreat(
     orderId: Id<"paymentOrders">,
-    status: "VALIDE" | "PAYE" | "REJETE"
+    status: "VALIDE" | "REJETE"
   ) {
     if (!token) return;
     setBusyId(orderId);
@@ -154,10 +156,8 @@ export default function AdminOrdresPaiementPage() {
       });
       setMsg(
         status === "VALIDE"
-          ? "Demande validée — visible pour la caisse Finance"
-          : status === "PAYE"
-            ? "Marquée comme payée"
-            : "Demande rejetée"
+          ? "Demande validée — l'employé peut confirmer sa réception"
+          : "Demande rejetée"
       );
     } catch (err) {
       setError(err instanceof Error ? err.message : "Erreur");
@@ -184,6 +184,26 @@ export default function AdminOrdresPaiementPage() {
     }
   }
 
+  function onPrintReceipt(order: NonNullable<typeof orders>[number]) {
+    if (
+      order.status !== "PAYE" ||
+      !order.confirmedAt ||
+      !order.receiptReference
+    ) {
+      return;
+    }
+    printPaymentReceipt({
+      receiptReference: order.receiptReference,
+      employeeName: order.employee.name,
+      employeeEmail: order.employee.email,
+      type: order.type,
+      amount: order.amount,
+      requestedAt: order.requestedAt,
+      disbursedAt: order.disbursedAt,
+      confirmedAt: order.confirmedAt,
+    });
+  }
+
   async function onCreateDemand(e: FormEvent) {
     e.preventDefault();
     if (!token || !newEmpId) return;
@@ -199,7 +219,7 @@ export default function AdminOrdresPaiementPage() {
       });
       setMsg(
         autoValidate
-          ? "Demande créée et validée — visible pour la caisse Finance"
+          ? "Demande créée et validée — en attente de confirmation par l'employé"
           : "Demande de paiement créée"
       );
       setNewAmount("");
@@ -211,10 +231,10 @@ export default function AdminOrdresPaiementPage() {
   }
 
   return (
-    <RequireAuth role="admin">
+    <RequireAuth page="admin-ordres">
       <PageShell
         title="Ordres de paiement"
-        description="Une ligne par demande : remarque employé, validation admin, puis paiement."
+        description="Validez les demandes. Le reçu est disponible après confirmation de réception par l'employé."
       >
         {error ? <p className="mb-3 text-sm text-red-600">{error}</p> : null}
         {msg ? <p className="mb-3 text-sm text-emerald-600">{msg}</p> : null}
@@ -245,6 +265,7 @@ export default function AdminOrdresPaiementPage() {
                   <option value="">Tous</option>
                   <option value="DEMANDE">Demande</option>
                   <option value="VALIDE">Validé</option>
+                  <option value="A_CONFIRMER">À confirmer</option>
                   <option value="PAYE">Payé</option>
                   <option value="REJETE">Rejeté</option>
                 </select>
@@ -263,13 +284,15 @@ export default function AdminOrdresPaiementPage() {
               <PrimaryButton type="button" onClick={openCreate}>
                 Nouvelle demande
               </PrimaryButton>
-              <SecondaryButton
-                type="button"
-                disabled={!filterEmployeeId || !employeeHistory}
-                onClick={onPrint}
-              >
-                Imprimer PDF employé
-              </SecondaryButton>
+              {user?.role === "admin" ? (
+                <SecondaryButton
+                  type="button"
+                  disabled={!filterEmployeeId || !employeeHistory}
+                  onClick={onPrint}
+                >
+                  Imprimer PDF employé
+                </SecondaryButton>
+              ) : null}
             </div>
           </div>
           {filterEmployeeId && employeeHistory ? (
@@ -364,17 +387,19 @@ export default function AdminOrdresPaiementPage() {
                             </SecondaryButton>
                           </>
                         ) : null}
-                        {order.status === "VALIDE" ? (
-                          <PrimaryButton
+                        {order.status === "PAYE" &&
+                        order.confirmedAt &&
+                        order.receiptReference ? (
+                          <SecondaryButton
                             type="button"
                             className="px-3 py-1.5 text-xs"
-                            disabled={busyId === order._id}
-                            onClick={() => onTreat(order._id, "PAYE")}
+                            onClick={() => onPrintReceipt(order)}
                           >
-                            Marquer payé
-                          </PrimaryButton>
+                            Imprimer le reçu
+                          </SecondaryButton>
                         ) : null}
-                        {order.status === "PAYE" || order.status === "REJETE" ? (
+                        {(order.status === "REJETE" ||
+                          (order.status === "PAYE" && !order.confirmedAt)) ? (
                           <span className="text-xs text-zinc-400">—</span>
                         ) : null}
                       </div>
@@ -459,7 +484,7 @@ export default function AdminOrdresPaiementPage() {
                 checked={autoValidate}
                 onChange={(e) => setAutoValidate(e.target.checked)}
               />
-              Valider immédiatement (envoie à la caisse Finance)
+              Valider immédiatement (confirmation de réception par l&apos;employé)
             </label>
             <div className="mt-2 flex justify-end gap-2">
               <SecondaryButton type="button" onClick={closeCreate}>

@@ -1,6 +1,6 @@
 import { mutation, query } from "./_generated/server";
 import { v } from "convex/values";
-import { requireAdmin, requireUser } from "./lib";
+import { requireAdminPage, requireUser } from "./lib";
 
 const scheduleValidator = v.object({
   workStartHour: v.number(),
@@ -63,14 +63,13 @@ function validateSchedule(schedule: {
 export const list = query({
   args: { token: v.string() },
   handler: async (ctx, args) => {
-    await requireAdmin(ctx, args.token);
-    const rows = await ctx.db.query("workplaces").collect();
+    await requireAdminPage(ctx, args.token, "admin-parametres");
+    const [rows, departments] = await Promise.all([
+      ctx.db.query("workplaces").collect(),
+      ctx.db.query("departments").collect(),
+    ]);
     const result = [];
     for (const wp of rows) {
-      const departments = await ctx.db
-        .query("departments")
-        .withIndex("by_workplace", (q) => q.eq("workplaceId", wp._id))
-        .collect();
       const employeeCount = (
         await ctx.db
           .query("users")
@@ -79,7 +78,9 @@ export const list = query({
       ).length;
       result.push({
         ...wp,
-        departments: departments.sort((a, b) => a.name.localeCompare(b.name)),
+        departments: [...departments].sort((a, b) =>
+          a.name.localeCompare(b.name)
+        ),
         departmentCount: departments.length,
         employeeCount,
       });
@@ -108,10 +109,11 @@ export const create = mutation({
     token: v.string(),
     name: v.string(),
     description: v.optional(v.string()),
+    associatedAgentCode: v.optional(v.string()),
     schedule: v.optional(scheduleValidator),
   },
   handler: async (ctx, args) => {
-    await requireAdmin(ctx, args.token);
+    await requireAdminPage(ctx, args.token, "admin-parametres");
     if (args.schedule) validateSchedule(args.schedule);
     const name = args.name.trim();
     if (!name) throw new Error("Le nom du lieu de travail est obligatoire");
@@ -125,6 +127,7 @@ export const create = mutation({
     const id = await ctx.db.insert("workplaces", {
       name,
       description: args.description?.trim() ?? "",
+      associatedAgentCode: args.associatedAgentCode?.trim() || undefined,
       ...(args.schedule ?? {}),
       createdAt: Date.now(),
     });
@@ -138,10 +141,11 @@ export const update = mutation({
     workplaceId: v.id("workplaces"),
     name: v.string(),
     description: v.optional(v.string()),
+    associatedAgentCode: v.optional(v.string()),
     schedule: v.optional(scheduleValidator),
   },
   handler: async (ctx, args) => {
-    await requireAdmin(ctx, args.token);
+    await requireAdminPage(ctx, args.token, "admin-parametres");
     if (args.schedule) validateSchedule(args.schedule);
     const wp = await ctx.db.get(args.workplaceId);
     if (!wp) throw new Error("Lieu de travail introuvable");
@@ -160,6 +164,7 @@ export const update = mutation({
     await ctx.db.patch(args.workplaceId, {
       name,
       description: args.description?.trim() ?? "",
+      associatedAgentCode: args.associatedAgentCode?.trim() || undefined,
       ...(args.schedule ?? {}),
     });
 
@@ -181,19 +186,9 @@ export const remove = mutation({
     workplaceId: v.id("workplaces"),
   },
   handler: async (ctx, args) => {
-    await requireAdmin(ctx, args.token);
+    await requireAdminPage(ctx, args.token, "admin-parametres");
     const wp = await ctx.db.get(args.workplaceId);
     if (!wp) throw new Error("Lieu de travail introuvable");
-
-    const departments = await ctx.db
-      .query("departments")
-      .withIndex("by_workplace", (q) => q.eq("workplaceId", args.workplaceId))
-      .collect();
-    if (departments.length > 0) {
-      throw new Error(
-        "Impossible de supprimer : supprimez d'abord les départements de ce lieu"
-      );
-    }
 
     const users = await ctx.db
       .query("users")

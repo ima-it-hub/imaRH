@@ -210,7 +210,7 @@ export function buildFinanceMonthRows(args: {
   ensure(now.getFullYear(), now.getMonth() + 1);
 
   for (const o of args.orders) {
-    if (!["DEMANDE", "VALIDE", "PAYE"].includes(o.status)) continue;
+    if (!["DEMANDE", "VALIDE", "A_CONFIRMER", "PAYE"].includes(o.status)) continue;
     const period = periodFromTs(o.requestedAt);
     const row = ensure(period.year, period.month);
     row.retraits += o.amount;
@@ -321,6 +321,40 @@ export function printFinanceHistory(args: {
   `;
 
   printDocument("Historique financier", html);
+}
+
+export function printPaymentReceipt(args: {
+  receiptReference: string;
+  employeeName: string;
+  employeeEmail: string;
+  type: string;
+  amount: number;
+  requestedAt: number;
+  disbursedAt?: number;
+  confirmedAt: number;
+}) {
+  const date = (timestamp: number) =>
+    new Date(timestamp).toLocaleString("fr-DZ", {
+      timeZone: "Africa/Algiers",
+    });
+  const html = `
+    <h1>Reçu de paiement</h1>
+    <p class="meta">Référence : ${escapeHtml(args.receiptReference)}</p>
+    <table>
+      <tbody>
+        <tr><th>Employé</th><td>${escapeHtml(args.employeeName)}</td></tr>
+        <tr><th>Email</th><td>${escapeHtml(args.employeeEmail)}</td></tr>
+        <tr><th>Type de paiement</th><td>${escapeHtml(args.type)}</td></tr>
+        <tr><th>Montant reçu</th><td>${escapeHtml(moneyDZD(args.amount))}</td></tr>
+        <tr><th>Date de la demande</th><td>${escapeHtml(date(args.requestedAt))}</td></tr>
+        <tr><th>Date de remise</th><td>${escapeHtml(date(args.disbursedAt ?? args.confirmedAt))}</td></tr>
+        <tr><th>Réception confirmée le</th><td>${escapeHtml(date(args.confirmedAt))}</td></tr>
+      </tbody>
+    </table>
+    <p class="foot">L'employé confirme avoir reçu le montant indiqué ci-dessus.</p>
+    <p style="margin-top:48px">Signature de l'employé : ______________________________</p>
+  `;
+  printDocument("Reçu de paiement", html);
 }
 
 export function printLeaveHistory(args: {
