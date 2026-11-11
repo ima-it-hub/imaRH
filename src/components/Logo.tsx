@@ -14,7 +14,7 @@ export function Logo({ variant = "full", className = "" }: LogoProps) {
           alt="IMA Plomberie"
           width={700}
           height={400}
-          className="w-36 object-contain"
+          className="h-full max-h-11 w-full max-w-36 object-contain"
           style={{ height: "auto" }}
           priority
         />

@@ -3,16 +3,13 @@
 import { FormEvent, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useMutation } from "convex/react";
 import { ScanBarcode } from "lucide-react";
-import { api } from "../../../convex/_generated/api";
 import { Logo } from "@/components/Logo";
 import { useAuth } from "@/lib/auth";
 import { getDefaultHref } from "@/lib/pages";
 
 export default function LoginPage() {
   const { user, isLoading, login } = useAuth();
-  const seedDemo = useMutation(api.seed.seedDemo);
   const router = useRouter();
 
   const [username, setUsername] = useState("");
@@ -25,18 +22,6 @@ export default function LoginPage() {
     const dest = getDefaultHref(user.role);
     router.replace(dest);
   }, [user, isLoading, router]);
-
-  useEffect(() => {
-    void (async () => {
-      try {
-        await seedDemo({});
-      } catch {
-        // Convex may not be configured yet
-      }
-    })();
-    // Run once on mount — seedDemo identity is not stable across renders
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();

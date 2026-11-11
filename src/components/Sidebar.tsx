@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useQuery } from "convex/react";
 import { LogOut, Menu, X } from "lucide-react";
-import { Fragment, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { api } from "../../convex/_generated/api";
 import { Logo } from "@/components/Logo";
 import { useAuth } from "@/lib/auth";
@@ -20,6 +20,15 @@ export function Sidebar() {
   const pathname = usePathname();
   const router = useRouter();
   const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") setOpen(false);
+    }
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [open]);
 
   const pendingBadges = useQuery(
     api.dashboard.navPendingBadges,
@@ -141,39 +150,45 @@ export function Sidebar() {
         {nav}
       </div>
 
-      <div className="fixed inset-x-0 top-0 z-30 flex h-14 items-center justify-between border-b border-zinc-200 bg-white px-4 lg:hidden">
-        <Logo variant="compact" />
+      <div className="fixed inset-x-0 top-0 z-30 flex h-16 items-center border-b border-zinc-200 bg-white px-4 lg:hidden">
         <button
           type="button"
-          onClick={() => setOpen(true)}
+          onClick={() => setOpen((value) => !value)}
           className="rounded-lg border border-zinc-200 p-2 text-zinc-700"
-          aria-label="Ouvrir le menu"
+          aria-label={open ? "Fermer le menu" : "Ouvrir le menu"}
+          aria-expanded={open}
         >
-          <Menu className="h-5 w-5" />
+          {open ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
         </button>
+        <div className="absolute left-1/2 h-12 w-36 -translate-x-1/2">
+          <Logo variant="compact" />
+        </div>
       </div>
 
-      {open && (
-        <div className="fixed inset-0 z-50 lg:hidden">
-          <button
-            type="button"
-            className="absolute inset-0 bg-black/50"
-            onClick={() => setOpen(false)}
-            aria-label="Fermer le menu"
-          />
-          <div className="absolute inset-y-0 left-0 flex">
-            {nav}
-            <button
-              type="button"
-              onClick={() => setOpen(false)}
-              className="m-3 h-10 w-10 rounded-full bg-white text-zinc-800 shadow"
-              aria-label="Fermer"
-            >
-              <X className="mx-auto h-5 w-5" />
-            </button>
-          </div>
+      <div
+        className={`fixed inset-0 z-50 lg:hidden ${
+          open ? "visible" : "invisible"
+        }`}
+        aria-hidden={!open}
+        inert={!open}
+      >
+        <button
+          type="button"
+          tabIndex={open ? 0 : -1}
+          className={`absolute inset-0 bg-black/50 transition-opacity duration-300 motion-reduce:transition-none ${
+            open ? "opacity-100" : "opacity-0"
+          }`}
+          onClick={() => setOpen(false)}
+          aria-label="Fermer le menu"
+        />
+        <div
+          className={`absolute inset-y-0 left-0 transition-transform duration-300 ease-out motion-reduce:transition-none ${
+            open ? "translate-x-0" : "-translate-x-full"
+          }`}
+        >
+          {nav}
         </div>
-      )}
+      </div>
     </>
   );
 }

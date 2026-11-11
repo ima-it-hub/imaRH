@@ -6,7 +6,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
     <AppGate>
       <div className="min-h-screen lg:pl-72">
         <Sidebar />
-        <main className="px-4 pt-20 pb-6 sm:px-6 lg:px-8 lg:pt-8 lg:pb-8">
+        <main className="px-4 pt-24 pb-6 sm:px-6 lg:px-8 lg:pt-8 lg:pb-8">
           {children}
         </main>
       </div>
