@@ -1,6 +1,6 @@
 import { ConvexHttpClient } from "convex/browser";
 import { api } from "../../../../../convex/_generated/api";
-import odbc from "odbc";
+import type odbc from "odbc";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -124,6 +124,20 @@ export async function POST(request: Request) {
     );
   }
 
+  let odbcClient: typeof import("odbc");
+  try {
+    odbcClient = await import("odbc");
+  } catch (error) {
+    console.error(
+      "Silwan ODBC driver unavailable:",
+      error instanceof Error ? error.message : "Unknown ODBC loading error"
+    );
+    return Response.json(
+      { error: "Le connecteur ODBC Silwan n'est pas disponible sur ce serveur." },
+      { status: 503 }
+    );
+  }
+
   const codes = [
     ...new Set(
       entries
@@ -142,11 +156,12 @@ export async function POST(request: Request) {
 
   let connection: odbc.Connection | undefined;
   try {
-    connection = await odbc.connect(connectionString);
+    const connected = await odbcClient.connect(connectionString);
+    connection = connected;
     const byCode = new Map<string, number>();
     const recouvrementByCode = new Map<string, number>();
     if (codes.length) {
-      const rows = await connection.query<ThirdPartyAggregate>(
+      const rows = await connected.query<ThirdPartyAggregate>(
         `
           SELECT tp."AssociatedAgent"::text AS "AssociatedAgentCode",
             COALESCE(
@@ -180,7 +195,7 @@ export async function POST(request: Request) {
         byCode.set(code, (byCode.get(code) ?? 0) + amount);
       }
 
-      const transactionRows = await connection.query<{
+      const transactionRows = await connected.query<{
         AssociatedAgentCode: string | number;
         Recouvrement: string | number | null;
       }>(
@@ -217,7 +232,7 @@ export async function POST(request: Request) {
     let centralTotal: number | undefined;
     let centralRecouvrement: number | undefined;
     if (hasCentralTotal) {
-      const [row] = await connection.query<TotalAggregate>(
+      const [row] = await connected.query<TotalAggregate>(
         `
           SELECT COALESCE(
             SUM(
@@ -241,7 +256,7 @@ export async function POST(request: Request) {
         throw new Error("Silwan returned an invalid central realization amount.");
       }
 
-      const [transactionRow] = await connection.query<TransactionAggregate>(
+      const [transactionRow] = await connected.query<TransactionAggregate>(
         `
           SELECT COALESCE(
             SUM(COALESCE("Credit", 0) - COALESCE("Debit", 0)),
