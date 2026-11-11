@@ -467,6 +467,20 @@ export default defineSchema({
     .index("by_period", ["year", "month"])
     .index("by_workplace_period", ["workplaceId", "year", "month"]),
 
+  realisationObjectivePlans: defineTable({
+    ownerType: v.union(v.literal("employee"), v.literal("workplace")),
+    employeeId: v.optional(v.id("users")),
+    workplaceId: v.optional(v.id("workplaces")),
+    year: v.number(),
+    month: v.number(),
+    objective: v.number(),
+    updatedAt: v.number(),
+    updatedBy: v.id("users"),
+  })
+    .index("by_employee_period", ["employeeId", "year", "month"])
+    .index("by_workplace_period", ["workplaceId", "year", "month"])
+    .index("by_period", ["year", "month"]),
+
   silwanRealisationSyncs: defineTable({
     ownerType: v.union(v.literal("employee"), v.literal("workplace")),
     employeeId: v.optional(v.id("users")),

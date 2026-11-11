@@ -4,9 +4,18 @@ import { useMemo, useState } from "react";
 import { useMutation, useQuery } from "convex/react";
 import { Trash2 } from "lucide-react";
 import { api } from "../../../../../convex/_generated/api";
+import type { Id } from "../../../../../convex/_generated/dataModel";
 import { PageShell } from "@/components/PageShell";
 import { RequireAuth } from "@/components/RequireAuth";
-import { Badge, Card, Field, PrimaryButton, inputClass } from "@/components/ui";
+import {
+  Badge,
+  Card,
+  Field,
+  Modal,
+  PrimaryButton,
+  SecondaryButton,
+  inputClass,
+} from "@/components/ui";
 import { useAuth } from "@/lib/auth";
 import { moneyDZD } from "@/lib/format";
 
@@ -41,6 +50,97 @@ function formatRealisation(value: number) {
   return (Math.round(value * 100) / 100).toFixed(2);
 }
 
+const MONTH_NAMES = Array.from({ length: 12 }, (_, index) =>
+  new Date(2000, index, 1)
+    .toLocaleString("fr-DZ", { month: "long" })
+    .toLocaleLowerCase("fr-DZ")
+);
+
+function parseMonthCell(value: string) {
+  const normalized = value
+    .trim()
+    .toLocaleLowerCase("fr-DZ")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+  const numericMonth = Number(normalized);
+  if (Number.isInteger(numericMonth) && numericMonth >= 1 && numericMonth <= 12) {
+    return numericMonth;
+  }
+  const monthIndex = MONTH_NAMES.findIndex(
+    (name) =>
+      name.normalize("NFD").replace(/[\u0300-\u036f]/g, "") === normalized
+  );
+  return monthIndex >= 0 ? monthIndex + 1 : null;
+}
+
+function parseObjectiveAmount(value: string) {
+  const normalized = value
+    .trim()
+    .replace(/[\s\u00a0\u202f]/g, "")
+    .replace(/[^\d,.-]/g, "");
+  if (!normalized) return null;
+  let numeric = normalized;
+  if (numeric.includes(",") && numeric.includes(".")) {
+    numeric =
+      numeric.lastIndexOf(",") > numeric.lastIndexOf(".")
+        ? numeric.replace(/\./g, "").replace(",", ".")
+        : numeric.replace(/,/g, "");
+  } else if (numeric.includes(",")) {
+    numeric = numeric.replace(",", ".");
+  } else if ((numeric.match(/\./g) ?? []).length > 1) {
+    const decimalPart = numeric.slice(numeric.lastIndexOf("."));
+    numeric =
+      numeric.slice(0, numeric.lastIndexOf(".")).replace(/\./g, "") +
+      decimalPart;
+  }
+  const amount = Number(numeric);
+  return Number.isFinite(amount) && amount > 0 ? amount : null;
+}
+
+function parseAnnualObjectivePaste(text: string) {
+  const entries = new Map<number, number>();
+  const errors: string[] = [];
+  for (const [index, rawLine] of text.split(/\r?\n/).entries()) {
+    if (!rawLine.trim()) continue;
+    const cells = rawLine.includes("\t")
+      ? rawLine.split("\t")
+      : rawLine.split(";");
+    const month = parseMonthCell(cells[0] ?? "");
+    const rowLabel = (cells[0] ?? "").trim().toLocaleLowerCase("fr-DZ");
+    if (!rowLabel && cells.slice(1).some((cell) => cell.trim())) continue;
+    if (
+      month === null &&
+      (/^(mois|month)\b/.test(rowLabel) ||
+        /^(total|total annuel|total annual)\b/.test(rowLabel))
+    ) {
+      continue;
+    }
+    if (month === null) {
+      errors.push(`Ligne ${index + 1} : mois non reconnu.`);
+      continue;
+    }
+    if (entries.has(month)) {
+      errors.push(`Ligne ${index + 1} : ${MONTH_NAMES[month - 1]} est en double.`);
+      continue;
+    }
+    const amount = parseObjectiveAmount(cells[cells.length - 1] ?? "");
+    if (amount === null) {
+      errors.push(`Ligne ${index + 1} : montant d'objectif invalide.`);
+      continue;
+    }
+    entries.set(month, amount);
+  }
+  if (entries.size !== 12) {
+    errors.push(`Il faut un objectif valide pour chacun des 12 mois (reçus : ${entries.size}/12).`);
+  }
+  return {
+    entries: [...entries.entries()]
+      .map(([month, objective]) => ({ month, objective }))
+      .sort((a, b) => a.month - b.month),
+    errors,
+  };
+}
+
 export default function AdminCalculPrimesPage() {
   const { token } = useAuth();
   const now = new Date();
@@ -53,6 +153,10 @@ export default function AdminCalculPrimesPage() {
     Record<string, Partial<WorkplacePrimeDraft>>
   >({});
   const [employeeToAdd, setEmployeeToAdd] = useState("");
+  const [annualObjectivesOpen, setAnnualObjectivesOpen] = useState(false);
+  const [annualObjectiveOwner, setAnnualObjectiveOwner] = useState("");
+  const [annualObjectivePaste, setAnnualObjectivePaste] = useState("");
+  const [annualObjectiveBusy, setAnnualObjectiveBusy] = useState(false);
   const [busy, setBusy] = useState(false);
   const [silwanBusy, setSilwanBusy] = useState(false);
   const [msg, setMsg] = useState("");
@@ -70,6 +174,13 @@ export default function AdminCalculPrimesPage() {
   const saveSilwanRealisations = useMutation(
     api.primeCalculations.saveSilwanRealisations
   );
+  const saveAnnualObjectives = useMutation(
+    api.primeCalculations.saveAnnualRealisationObjectives
+  );
+  const parsedAnnualObjectives = useMemo(
+    () => parseAnnualObjectivePaste(annualObjectivePaste),
+    [annualObjectivePaste]
+  );
 
   const drafts = useMemo(() => {
     const result: Record<string, PrimeDraft> = {};
@@ -80,11 +191,13 @@ export default function AdminCalculPrimesPage() {
           (calc?.calculationVersion === 2 && calc.hasOwnMetrics === true) ||
           row.silwanRealisation !== null,
         objective:
-          calc?.calculationVersion === 2
-            ? String(calc.objective)
-            : row.previousMonthObjective !== null
-              ? String(row.previousMonthObjective)
-              : "",
+          row.annualObjective !== null
+            ? String(row.annualObjective)
+            : calc?.calculationVersion === 2
+              ? String(calc.objective)
+              : row.previousMonthObjective !== null
+                ? String(row.previousMonthObjective)
+                : "",
         realisation:
           row.silwanRealisation !== null
             ? formatRealisation(row.silwanRealisation)
@@ -114,17 +227,22 @@ export default function AdminCalculPrimesPage() {
     for (const row of workplaceRows ?? []) {
       const metric = row.metrics;
       result[row.workplace._id] = {
-        objective: metric
-          ? String(metric.objective)
-          : row.previousMonthObjective !== null
-            ? String(row.previousMonthObjective)
-            : "",
+        objective:
+          row.annualObjective !== null
+            ? String(row.annualObjective)
+            : metric
+              ? String(metric.objective)
+              : row.previousMonthObjective !== null
+              ? String(row.previousMonthObjective)
+                : "",
         realisation:
           row.silwanRealisation !== null
             ? formatRealisation(row.silwanRealisation)
             : metric
               ? formatRealisation(metric.realisation)
-              : "",
+              : row.annualObjective !== null
+                ? "0"
+                : "",
         recoveryObjective:
           metric?.recoveryObjective !== undefined
             ? String(metric.recoveryObjective)
@@ -202,6 +320,55 @@ export default function AdminCalculPrimesPage() {
     if (!employeeToAdd) return;
     updateDraft(employeeToAdd, "selected", true);
     setEmployeeToAdd("");
+  }
+
+  async function saveAnnualObjectivePaste() {
+    if (!token || !annualObjectiveOwner) return;
+    if (parsedAnnualObjectives.errors.length > 0) {
+      setError(parsedAnnualObjectives.errors[0] ?? "Tableau invalide.");
+      return;
+    }
+    const [ownerType, ownerId] = annualObjectiveOwner.split(":");
+    if (
+      (ownerType !== "employee" && ownerType !== "workplace") ||
+      !ownerId
+    ) {
+      setError("Sélectionnez un employé ou un lieu de travail.");
+      return;
+    }
+
+    setAnnualObjectiveBusy(true);
+    setError("");
+    setMsg("");
+    try {
+      const ownerName =
+        ownerType === "employee"
+          ? rows?.find((row) => row.employee._id === ownerId)?.employee.name
+          : workplaceRows?.find((row) => row.workplace._id === ownerId)
+              ?.workplace.name;
+      await saveAnnualObjectives({
+        token,
+        year,
+        ownerType,
+        ...(ownerType === "employee"
+          ? { employeeId: ownerId as Id<"users"> }
+          : {}),
+        ...(ownerType === "workplace"
+          ? { workplaceId: ownerId as Id<"workplaces"> }
+          : {}),
+        monthlyObjectives: parsedAnnualObjectives.entries,
+      });
+      setMsg(
+        `Les 12 objectifs mensuels de ${ownerName ?? "l'entité sélectionnée"} ont été enregistrés pour ${year}. L'objectif du mois affiché est prêt à être utilisé dans le calcul.`
+      );
+      setAnnualObjectivesOpen(false);
+      setAnnualObjectivePaste("");
+      setAnnualObjectiveOwner("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Erreur d'enregistrement.");
+    } finally {
+      setAnnualObjectiveBusy(false);
+    }
   }
 
   function updateWorkplaceDraft(
@@ -489,6 +656,18 @@ export default function AdminCalculPrimesPage() {
           >
             {silwanBusy ? "Import Silwan…" : "Importer depuis Silwan"}
           </PrimaryButton>
+          <SecondaryButton
+            type="button"
+            disabled={!rows || !workplaceRows}
+            onClick={() => {
+              setAnnualObjectivePaste("");
+              setAnnualObjectiveOwner("");
+              setError("");
+              setAnnualObjectivesOpen(true);
+            }}
+          >
+            Importer les objectifs annuels
+          </SecondaryButton>
         </div>
 
         <Card>
@@ -860,6 +1039,116 @@ export default function AdminCalculPrimesPage() {
             </PrimaryButton>
           </div>
         </Card>
+        <Modal
+          open={annualObjectivesOpen}
+          onClose={() => {
+            if (annualObjectiveBusy) return;
+            setAnnualObjectivesOpen(false);
+          }}
+          title="Importer les objectifs annuels"
+        >
+          <div className="space-y-4">
+            <p className="text-sm text-zinc-600">
+              Choisissez un employé ou un lieu de travail, puis collez les 12
+              lignes copiées depuis Excel. Format attendu :{" "}
+              <strong>Mois · pourcentage · montant objectif</strong>. Le
+              pourcentage est ignoré; seul le montant est enregistré.
+            </p>
+            <Field label="Employé ou lieu de travail">
+              <select
+                className={inputClass}
+                value={annualObjectiveOwner}
+                onChange={(event) =>
+                  setAnnualObjectiveOwner(event.target.value)
+                }
+              >
+                <option value="">Choisir…</option>
+                <optgroup label="Lieux de travail">
+                  {(workplaceRows ?? []).map(({ workplace }) => (
+                    <option
+                      key={workplace._id}
+                      value={`workplace:${workplace._id}`}
+                    >
+                      {workplace.name}
+                    </option>
+                  ))}
+                </optgroup>
+                <optgroup label="Employés">
+                  {(rows ?? [])
+                    .filter(({ employee }) => employee.role === "employee")
+                    .map(({ employee }) => (
+                      <option
+                        key={employee._id}
+                        value={`employee:${employee._id}`}
+                      >
+                        {employee.name}
+                      </option>
+                    ))}
+                </optgroup>
+              </select>
+            </Field>
+            <Field label={`Tableau Excel — année ${year}`}>
+              <textarea
+                rows={9}
+                className={inputClass}
+                value={annualObjectivePaste}
+                onChange={(event) => setAnnualObjectivePaste(event.target.value)}
+                placeholder={
+                  "Janvier\t9%\t108 000 000.00\nFévrier\t8%\t96 000 000.00\n…"
+                }
+              />
+            </Field>
+            {error ? (
+              <p className="text-sm text-red-600" role="alert">
+                {error}
+              </p>
+            ) : null}
+            {annualObjectivePaste.trim() ? (
+              parsedAnnualObjectives.errors.length > 0 ? (
+                <div className="rounded-xl bg-red-50 px-3 py-2 text-sm text-red-700">
+                  <p className="font-semibold">Vérifiez le tableau :</p>
+                  <ul className="mt-1 list-inside list-disc">
+                    {parsedAnnualObjectives.errors.slice(0, 5).map((issue) => (
+                      <li key={issue}>{issue}</li>
+                    ))}
+                  </ul>
+                </div>
+              ) : (
+                <div className="rounded-xl bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
+                  12 mois valides · Total annuel :{" "}
+                  <strong>
+                    {moneyDZD(
+                      parsedAnnualObjectives.entries.reduce(
+                        (sum, entry) => sum + entry.objective,
+                        0
+                      )
+                    )}
+                  </strong>
+                </div>
+              )
+            ) : null}
+            <div className="flex flex-wrap justify-end gap-2">
+              <SecondaryButton
+                type="button"
+                disabled={annualObjectiveBusy}
+                onClick={() => setAnnualObjectivesOpen(false)}
+              >
+                Annuler
+              </SecondaryButton>
+              <PrimaryButton
+                type="button"
+                disabled={
+                  annualObjectiveBusy ||
+                  !annualObjectiveOwner ||
+                  parsedAnnualObjectives.errors.length > 0
+                }
+                onClick={() => void saveAnnualObjectivePaste()}
+              >
+                {annualObjectiveBusy ? "Enregistrement…" : "Enregistrer l'année"}
+              </PrimaryButton>
+            </div>
+          </div>
+        </Modal>
       </PageShell>
     </RequireAuth>
   );

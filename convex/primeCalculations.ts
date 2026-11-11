@@ -221,6 +221,12 @@ export const employeesForMonth = query({
         q.eq("year", args.year).eq("month", args.month)
       )
       .collect();
+    const objectivePlans = await ctx.db
+      .query("realisationObjectivePlans")
+      .withIndex("by_period", (q) =>
+        q.eq("year", args.year).eq("month", args.month)
+      )
+      .collect();
     const previous = previousPeriod(args.year, args.month);
     const [previousCalculations, previousWorkplaceMetrics] = await Promise.all([
       ctx.db
@@ -246,6 +252,11 @@ export const employeesForMonth = query({
       silwanSyncs
         .filter((sync) => sync.ownerType === "employee" && sync.employeeId)
         .map((sync) => [sync.employeeId!, sync])
+    );
+    const objectiveByEmployee = new Map(
+      objectivePlans
+        .filter((plan) => plan.ownerType === "employee" && plan.employeeId)
+        .map((plan) => [plan.employeeId!, plan.objective])
     );
     const previousCalculationByEmployee = new Map(
       previousCalculations.map((calculation) => [
@@ -339,6 +350,7 @@ export const employeesForMonth = query({
         previousMonthRecoveryObjective:
           previousRecoveryDefaults.find((value) => value !== null) ?? null,
         previousMonthObjective,
+        annualObjective: objectiveByEmployee.get(employee._id) ?? null,
         calculation: currentCalculation ?? null,
         silwanRealisation:
           silwanSync &&
@@ -378,7 +390,7 @@ export const workplaceMetricsForMonth = query({
   },
   handler: async (ctx, args) => {
     await requireAdminPage(ctx, args.token, "admin-calcul-primes");
-    const [workplaces, metrics, silwanSyncs] = await Promise.all([
+    const [workplaces, metrics, silwanSyncs, objectivePlans] = await Promise.all([
       ctx.db.query("workplaces").collect(),
       ctx.db
         .query("workplacePrimeMetrics")
@@ -388,6 +400,12 @@ export const workplaceMetricsForMonth = query({
         .collect(),
       ctx.db
         .query("silwanRealisationSyncs")
+        .withIndex("by_period", (q) =>
+          q.eq("year", args.year).eq("month", args.month)
+        )
+        .collect(),
+      ctx.db
+        .query("realisationObjectivePlans")
         .withIndex("by_period", (q) =>
           q.eq("year", args.year).eq("month", args.month)
         )
@@ -408,6 +426,11 @@ export const workplaceMetricsForMonth = query({
         .filter((sync) => sync.ownerType === "workplace" && sync.workplaceId)
         .map((sync) => [sync.workplaceId!, sync])
     );
+    const objectiveByWorkplace = new Map(
+      objectivePlans
+        .filter((plan) => plan.ownerType === "workplace" && plan.workplaceId)
+        .map((plan) => [plan.workplaceId!, plan.objective])
+    );
     const previousMetricByWorkplace = new Map(
       previousMetrics.map((metric) => [metric.workplaceId, metric])
     );
@@ -418,6 +441,7 @@ export const workplaceMetricsForMonth = query({
         return {
           workplace,
           metrics: metric ?? null,
+          annualObjective: objectiveByWorkplace.get(workplace._id) ?? null,
           silwanRealisation:
             silwanSync && (!metric || silwanSync.updatedAt > metric.updatedAt)
               ? silwanSync.realisation
@@ -441,6 +465,108 @@ export const workplaceMetricsForMonth = query({
         };
       })
       .sort((a, b) => a.workplace.name.localeCompare(b.workplace.name));
+  },
+});
+
+export const saveAnnualRealisationObjectives = mutation({
+  args: {
+    token: v.string(),
+    year: v.number(),
+    ownerType: v.union(v.literal("employee"), v.literal("workplace")),
+    employeeId: v.optional(v.id("users")),
+    workplaceId: v.optional(v.id("workplaces")),
+    monthlyObjectives: v.array(
+      v.object({
+        month: v.number(),
+        objective: v.number(),
+      })
+    ),
+  },
+  handler: async (ctx, args) => {
+    const admin = await requireAdminPage(
+      ctx,
+      args.token,
+      "admin-calcul-primes"
+    );
+    if (!Number.isInteger(args.year) || args.year < 2000) {
+      throw new Error("Année invalide.");
+    }
+    if (
+      args.ownerType === "employee"
+        ? !args.employeeId || args.workplaceId !== undefined
+        : !args.workplaceId || args.employeeId !== undefined
+    ) {
+      throw new Error("Sélectionnez un seul employé ou lieu de travail.");
+    }
+    if (
+      args.monthlyObjectives.length !== 12 ||
+      new Set(args.monthlyObjectives.map((entry) => entry.month)).size !== 12 ||
+      args.monthlyObjectives.some(
+        (entry) =>
+          !Number.isInteger(entry.month) ||
+          entry.month < 1 ||
+          entry.month > 12 ||
+          !Number.isFinite(entry.objective) ||
+          entry.objective <= 0
+      )
+    ) {
+      throw new Error(
+        "Fournissez un objectif positif pour chacun des 12 mois."
+      );
+    }
+
+    if (args.ownerType === "employee") {
+      const employee = await ctx.db.get(args.employeeId!);
+      if (
+        !employee ||
+        employee.role !== "employee" ||
+        !employee.isActive ||
+        employee.resignedAt
+      ) {
+        throw new Error("Employé introuvable ou inactif.");
+      }
+    } else {
+      const workplace = await ctx.db.get(args.workplaceId!);
+      if (!workplace) throw new Error("Lieu de travail introuvable.");
+    }
+
+    const existing = args.ownerType === "employee"
+      ? await ctx.db
+          .query("realisationObjectivePlans")
+          .withIndex("by_employee_period", (q) =>
+            q.eq("employeeId", args.employeeId).eq("year", args.year)
+          )
+          .collect()
+      : await ctx.db
+          .query("realisationObjectivePlans")
+          .withIndex("by_workplace_period", (q) =>
+            q.eq("workplaceId", args.workplaceId).eq("year", args.year)
+          )
+          .collect();
+    const byMonth = new Map(existing.map((plan) => [plan.month, plan]));
+    const now = Date.now();
+    for (const entry of args.monthlyObjectives) {
+      const owner =
+        args.ownerType === "employee"
+          ? { employeeId: args.employeeId }
+          : { workplaceId: args.workplaceId };
+      const payload = {
+        ...owner,
+        ownerType: args.ownerType,
+        year: args.year,
+        month: entry.month,
+        objective: Math.round(entry.objective * 100) / 100,
+        updatedAt: now,
+        updatedBy: admin._id,
+      };
+      const current = byMonth.get(entry.month);
+      if (current) {
+        await ctx.db.patch(current._id, payload);
+      } else {
+        await ctx.db.insert("realisationObjectivePlans", payload);
+      }
+    }
+    return { saved: args.monthlyObjectives.length };
   },
 });
 
@@ -832,6 +958,22 @@ export const saveDrafts = mutation({
         q.eq("year", args.year).eq("month", args.month)
       )
       .collect();
+    const annualObjectivePlans = await ctx.db
+      .query("realisationObjectivePlans")
+      .withIndex("by_period", (q) =>
+        q.eq("year", args.year).eq("month", args.month)
+      )
+      .collect();
+    const workplaceObjectivePlanById = new Map(
+      annualObjectivePlans
+        .filter((plan) => plan.ownerType === "workplace" && plan.workplaceId)
+        .map((plan) => [plan.workplaceId!, plan])
+    );
+    const employeeObjectivePlanById = new Map(
+      annualObjectivePlans
+        .filter((plan) => plan.ownerType === "employee" && plan.employeeId)
+        .map((plan) => [plan.employeeId!, plan])
+    );
     const metricsByWorkplace = new Map(
       existingWorkplaceMetrics.map((metric) => [
         metric.workplaceId,
@@ -844,6 +986,7 @@ export const saveDrafts = mutation({
         throw new Error("Lieu de travail introuvable");
       }
       const existing = metricsByWorkplace.get(entry.workplaceId);
+      const objectivePlan = workplaceObjectivePlanById.get(entry.workplaceId);
       if (entry.objective === null && entry.realisation === null) {
         if (entry.recoveryObjective !== null || entry.recouvrement !== null) {
           throw new Error(
@@ -855,6 +998,7 @@ export const saveDrafts = mutation({
           metricsByWorkplace.delete(entry.workplaceId);
           changedWorkplaceIds.add(entry.workplaceId);
         }
+        if (objectivePlan) await ctx.db.delete(objectivePlan._id);
         continue;
       }
       if (
@@ -914,6 +1058,13 @@ export const saveDrafts = mutation({
         const inserted = await ctx.db.get(id);
         if (inserted) metricsByWorkplace.set(entry.workplaceId, inserted);
       }
+      if (objectivePlan) {
+        await ctx.db.patch(objectivePlan._id, {
+          objective: entry.objective,
+          updatedAt: now,
+          updatedBy: admin._id,
+        });
+      }
     }
 
     const companyRealisationRatio = await companyRealisationRatioForMonth(
@@ -950,6 +1101,7 @@ export const saveDrafts = mutation({
       }
 
       const existing = calculationByEmployee.get(entry.employeeId);
+      const objectivePlan = employeeObjectivePlanById.get(entry.employeeId);
       if (
         !existing ||
         existing.objective !== entry.objective ||
@@ -1037,6 +1189,13 @@ export const saveDrafts = mutation({
         });
         const inserted = await ctx.db.get(id);
         if (inserted) calculationByEmployee.set(entry.employeeId, inserted);
+      }
+      if (objectivePlan) {
+        await ctx.db.patch(objectivePlan._id, {
+          objective: entry.objective,
+          updatedAt: now,
+          updatedBy: admin._id,
+        });
       }
     }
 
