@@ -99,6 +99,36 @@ function previousPeriod(year: number, month: number) {
     : { year, month: month - 1 };
 }
 
+function isEligibleForPrimePeriod(
+  hireDate: number | undefined,
+  year: number,
+  month: number
+) {
+  if (hireDate === undefined) return true;
+
+  const hiredAt = new Date(hireDate);
+  const monthIndex = hiredAt.getUTCMonth() + 3;
+  const eligibleYear =
+    hiredAt.getUTCFullYear() + Math.floor(monthIndex / 12);
+  const eligibleMonth = monthIndex % 12;
+  const eligibleDay = Math.min(
+    hiredAt.getUTCDate(),
+    new Date(Date.UTC(eligibleYear, eligibleMonth + 1, 0)).getUTCDate()
+  );
+  const eligibleAt = Date.UTC(
+    eligibleYear,
+    eligibleMonth,
+    eligibleDay,
+    hiredAt.getUTCHours(),
+    hiredAt.getUTCMinutes(),
+    hiredAt.getUTCSeconds(),
+    hiredAt.getUTCMilliseconds()
+  );
+  const periodEnd = Date.UTC(year, month, 0, 23, 59, 59, 999);
+
+  return periodEnd >= eligibleAt;
+}
+
 function carryForwardRecoveryObjective(
   realisation: number | undefined,
   recoveryObjective: number | undefined,
@@ -110,6 +140,105 @@ function carryForwardRecoveryObjective(
       ? recoveryObjective - recouvrement
       : 0;
   return Math.max(0, realisation + recoveryDifference);
+}
+
+type WorkplacePrimeAggregate = {
+  objective: number;
+  realisation: number;
+  recoveryObjective?: number;
+  recouvrement?: number;
+  updatedAt: number;
+};
+
+function aggregateWorkplacePrimeSources(
+  workplaceIds: Id<"workplaces">[],
+  metricsByWorkplace: Map<
+    Id<"workplaces">,
+    Doc<"workplacePrimeMetrics">
+  >,
+  silwanByWorkplace: Map<
+    Id<"workplaces">,
+    Doc<"silwanRealisationSyncs">
+  >
+): WorkplacePrimeAggregate | null {
+  if (!workplaceIds.length) return null;
+
+  let objective = 0;
+  let realisation = 0;
+  let recoveryObjective = 0;
+  let recouvrement = 0;
+  let recoveryReady = true;
+  let updatedAt = 0;
+
+  for (const workplaceId of workplaceIds) {
+    const metric = metricsByWorkplace.get(workplaceId);
+    if (!metric) return null;
+
+    const sync = silwanByWorkplace.get(workplaceId);
+    const useSilwan = Boolean(sync && sync.updatedAt >= metric.updatedAt);
+    objective += metric.objective;
+    realisation += useSilwan ? sync!.realisation : metric.realisation;
+    updatedAt = Math.max(updatedAt, metric.updatedAt, sync?.updatedAt ?? 0);
+
+    if (
+      metric.recoveryObjective === undefined ||
+      (metric.recouvrement === undefined &&
+        (sync?.recouvrement === undefined || !useSilwan))
+    ) {
+      recoveryReady = false;
+    } else {
+      recoveryObjective += metric.recoveryObjective;
+      recouvrement +=
+        useSilwan && sync?.recouvrement !== undefined
+          ? sync.recouvrement
+          : metric.recouvrement ?? 0;
+    }
+  }
+
+  return {
+    objective,
+    realisation,
+    recoveryObjective: recoveryReady ? recoveryObjective : undefined,
+    recouvrement: recoveryReady ? recouvrement : undefined,
+    updatedAt,
+  };
+}
+
+function employeePrimeSourceIds(employee: Doc<"users">) {
+  return {
+    realisation:
+      employee.primeRealisationWorkplaceIds !== undefined
+        ? employee.primeRealisationWorkplaceIds
+        : employee.workplaceId
+          ? [employee.workplaceId]
+          : [],
+    recovery:
+      employee.primeRecoveryWorkplaceIds !== undefined
+        ? employee.primeRecoveryWorkplaceIds
+        : employee.workplaceId
+          ? [employee.workplaceId]
+          : [],
+  };
+}
+
+function hasPrimeRealisationSource(employee: Doc<"users">) {
+  return employeePrimeSourceIds(employee).realisation.length > 0;
+}
+
+function hasPrimeRecoverySource(employee: Doc<"users">) {
+  return employee.primeRecoveryWorkplaceIds !== undefined
+    ? employee.primeRecoveryWorkplaceIds.length > 0
+    : isShowroomResponsible(employee.department);
+}
+
+function sameWorkplaceIds(
+  left: Id<"workplaces">[] | undefined,
+  right: Id<"workplaces">[]
+) {
+  return (
+    (left ?? []).length === right.length &&
+    (left ?? []).every((id) => right.includes(id))
+  );
 }
 
 async function upsertInheritedDraft(
@@ -124,6 +253,9 @@ async function upsertInheritedDraft(
     recouvrement?: number;
     sourceManagerId?: Id<"users">;
     sourceWorkplaceId?: Id<"workplaces">;
+    sourceRealisationWorkplaceIds?: Id<"workplaces">[];
+    sourceRecoveryWorkplaceIds?: Id<"workplaces">[];
+    sourceWorkplaceUpdatedAt?: number;
     applyRecoveryAdjustment: boolean;
   },
   companyRealisationRatio: number | null,
@@ -162,6 +294,9 @@ async function upsertInheritedDraft(
     hasOwnMetrics: false,
     sourceManagerId: source.sourceManagerId,
     sourceWorkplaceId: source.sourceWorkplaceId,
+    sourceRealisationWorkplaceIds: source.sourceRealisationWorkplaceIds,
+    sourceRecoveryWorkplaceIds: source.sourceRecoveryWorkplaceIds,
+    sourceWorkplaceUpdatedAt: source.sourceWorkplaceUpdatedAt,
     ...computed,
     adminAdjustedAmount: undefined,
     calculationVersion: 2,
@@ -215,6 +350,12 @@ export const employeesForMonth = query({
         q.eq("year", args.year).eq("month", args.month)
       )
       .collect();
+    const workplaceMetrics = await ctx.db
+      .query("workplacePrimeMetrics")
+      .withIndex("by_period", (q) =>
+        q.eq("year", args.year).eq("month", args.month)
+      )
+      .collect();
     const silwanSyncs = await ctx.db
       .query("silwanRealisationSyncs")
       .withIndex("by_period", (q) =>
@@ -253,6 +394,14 @@ export const employeesForMonth = query({
         .filter((sync) => sync.ownerType === "employee" && sync.employeeId)
         .map((sync) => [sync.employeeId!, sync])
     );
+    const silwanByWorkplace = new Map(
+      silwanSyncs
+        .filter((sync) => sync.ownerType === "workplace" && sync.workplaceId)
+        .map((sync) => [sync.workplaceId!, sync])
+    );
+    const workplaceMetricById = new Map(
+      workplaceMetrics.map((metric) => [metric.workplaceId, metric])
+    );
     const objectiveByEmployee = new Map(
       objectivePlans
         .filter((plan) => plan.ownerType === "employee" && plan.employeeId)
@@ -287,9 +436,22 @@ export const employeesForMonth = query({
       );
       const currentCalculation = calculationByEmployee.get(employee._id);
       const silwanSync = silwanByEmployee.get(employee._id);
-      const previousWorkplaceMetric = employee.workplaceId
-        ? previousMetricByWorkplace.get(employee.workplaceId)
-        : undefined;
+      const sourceIds = employeePrimeSourceIds(employee);
+      const realizationSources = aggregateWorkplacePrimeSources(
+        sourceIds.realisation,
+        workplaceMetricById,
+        silwanByWorkplace
+      );
+      const recoverySources = aggregateWorkplacePrimeSources(
+        sourceIds.recovery,
+        workplaceMetricById,
+        silwanByWorkplace
+      );
+      const sourceWorkplaces = await Promise.all(
+        [...new Set([...sourceIds.realisation, ...sourceIds.recovery])].map(
+          (workplaceId) => ctx.db.get(workplaceId)
+        )
+      );
       const previousManagerCalculation = employee.managerId
         ? previousCalculationByEmployee.get(employee.managerId)
         : undefined;
@@ -300,12 +462,23 @@ export const employeesForMonth = query({
             previousEmployeeCalculation.recouvrement
           )
         : null;
-      const previousWorkplaceRecovery = previousWorkplaceMetric
-        ? carryForwardRecoveryObjective(
-            previousWorkplaceMetric.realisation,
-            previousWorkplaceMetric.recoveryObjective,
-            previousWorkplaceMetric.recouvrement
-          )
+      const previousRealisationSources = aggregateWorkplacePrimeSources(
+        sourceIds.realisation,
+        previousMetricByWorkplace,
+        new Map()
+      );
+      const previousRecoverySources = aggregateWorkplacePrimeSources(
+        sourceIds.recovery,
+        previousMetricByWorkplace,
+        new Map()
+      );
+      const previousWorkplaceRecovery =
+        previousRecoverySources?.realisation !== undefined
+          ? carryForwardRecoveryObjective(
+              previousRecoverySources.realisation,
+              previousRecoverySources.recoveryObjective,
+              previousRecoverySources.recouvrement
+            )
         : null;
       const previousManagerRecovery =
         previousManagerCalculation?.calculationVersion === 2 &&
@@ -336,7 +509,7 @@ export const employeesForMonth = query({
       const previousMonthObjective =
         previousEmployeeCalculation?.calculationVersion === 2
             ? previousEmployeeCalculation.objective
-            : previousWorkplaceMetric?.objective ??
+            : previousRealisationSources?.objective ??
               (previousManagerCalculation?.calculationVersion === 2 &&
               previousManagerCalculation.hasOwnMetrics === true
                 ? previousManagerCalculation.objective
@@ -344,9 +517,29 @@ export const employeesForMonth = query({
 
       result.push({
         employee: publicUser(employee),
+        primeEligible:
+          employee.role !== "employee" ||
+          (isEligibleForPrimePeriod(employee.hireDate, args.year, args.month) &&
+            hasPrimeRealisationSource(employee)),
         managerName: manager?.name ?? "",
         workplaceName: workplace?.name ?? employee.workplace ?? "",
-        usesWorkplaceRecovery: isShowroomResponsible(employee.department),
+        primeSourceWorkplaceNames: sourceWorkplaces.flatMap((sourceWorkplace) =>
+          sourceWorkplace ? [sourceWorkplace.name] : []
+        ),
+        primeSourceObjective: realizationSources?.objective ?? null,
+        primeSourceRealisation: realizationSources?.realisation ?? null,
+        primeSourceRecoveryObjective:
+          recoverySources?.recoveryObjective ?? null,
+        primeSourceRecouvrement: recoverySources?.recouvrement ?? null,
+        hasRecoverySource:
+          employee.primeRecoveryWorkplaceIds === undefined ||
+          hasPrimeRecoverySource(employee),
+        primeSourceUpdatedAt: Math.max(
+          realizationSources?.updatedAt ?? 0,
+          recoverySources?.updatedAt ?? 0
+        ),
+        usesWorkplaceRecovery:
+          hasPrimeRecoverySource(employee) && sourceIds.recovery.length > 0,
         previousMonthRecoveryObjective:
           previousRecoveryDefaults.find((value) => value !== null) ?? null,
         previousMonthObjective,
@@ -575,14 +768,6 @@ export const saveSilwanRealisations = mutation({
     token: v.string(),
     month: v.number(),
     year: v.number(),
-    employeeEntries: v.array(
-      v.object({
-        employeeId: v.id("users"),
-        associatedAgentCode: v.string(),
-        realisation: v.number(),
-        recouvrement: v.number(),
-      })
-    ),
     workplaceEntries: v.array(
       v.object({
         workplaceId: v.id("workplaces"),
@@ -604,30 +789,16 @@ export const saveSilwanRealisations = mutation({
       throw new Error("Période de réalisation invalide");
     }
 
-    const entries = [
-      ...args.employeeEntries.map((entry) => ({
-        ownerType: "employee" as const,
-        employeeId: entry.employeeId,
-        associatedAgentCode: entry.associatedAgentCode.trim(),
-        allDocuments: false,
-        realisation: entry.realisation,
-        recouvrement: entry.recouvrement,
-      })),
-      ...args.workplaceEntries.map((entry) => ({
-        ownerType: "workplace" as const,
-        workplaceId: entry.workplaceId,
-        associatedAgentCode: entry.associatedAgentCode?.trim() || undefined,
-        allDocuments: entry.allDocuments === true,
-        realisation: entry.realisation,
-        recouvrement: entry.recouvrement,
-      })),
-    ];
+    const entries = args.workplaceEntries.map((entry) => ({
+      ownerType: "workplace" as const,
+      workplaceId: entry.workplaceId,
+      associatedAgentCode: entry.associatedAgentCode?.trim() || undefined,
+      allDocuments: entry.allDocuments === true,
+      realisation: entry.realisation,
+      recouvrement: entry.recouvrement,
+    }));
     const uniqueKeys = new Set(
-      entries.map((entry) =>
-        entry.ownerType === "employee"
-          ? `employee:${entry.employeeId}`
-          : `workplace:${entry.workplaceId}`
-      )
+      entries.map((entry) => `workplace:${entry.workplaceId}`)
     );
     if (uniqueKeys.size !== entries.length) {
       throw new Error("Une réalisation est fournie plusieurs fois");
@@ -636,10 +807,7 @@ export const saveSilwanRealisations = mutation({
     const now = Date.now();
     for (const entry of entries) {
       if (
-        (entry.ownerType === "employee" && !entry.associatedAgentCode) ||
-        (entry.ownerType === "workplace" &&
-          !entry.allDocuments &&
-          !entry.associatedAgentCode) ||
+        (!entry.allDocuments && !entry.associatedAgentCode) ||
         !Number.isFinite(entry.realisation) ||
         entry.realisation < 0 ||
         !Number.isFinite(entry.recouvrement)
@@ -647,84 +815,40 @@ export const saveSilwanRealisations = mutation({
         throw new Error("Code ou montant de réalisation invalide");
       }
 
-      let existing: Doc<"silwanRealisationSyncs"> | null;
-      if (entry.ownerType === "employee") {
-        if (!entry.associatedAgentCode) {
-          throw new Error("Code AssociatedAgent employé invalide");
-        }
-        const employee = await ctx.db.get(entry.employeeId);
-        if (
-          !employee ||
-          employee.role !== "employee" ||
-          !employee.isActive ||
-          employee.resignedAt
-        ) {
-          throw new Error("Employé introuvable ou inactif");
-        }
-        if (
-          employee.associatedAgentCode?.trim() !== entry.associatedAgentCode
-        ) {
-          throw new Error(
-            "Le code AssociatedAgent a changé. Rechargez la page."
-          );
-        }
-        existing = await ctx.db
-          .query("silwanRealisationSyncs")
-          .withIndex("by_employee_period", (q) =>
-            q
-              .eq("employeeId", entry.employeeId)
-              .eq("year", args.year)
-              .eq("month", args.month)
-          )
-          .unique();
-      } else {
-        const workplace = await ctx.db.get(entry.workplaceId);
-        const isCentralWorkplace =
-          workplace?.name.trim().toLocaleUpperCase("fr-DZ") === "BEN ZARGA";
-        if (!workplace) {
-          throw new Error("Lieu de travail introuvable");
-        }
-        if (
-          entry.allDocuments
-            ? !isCentralWorkplace || Boolean(entry.associatedAgentCode)
-            : !entry.associatedAgentCode ||
-              workplace.associatedAgentCode?.trim() !== entry.associatedAgentCode
-        ) {
-          throw new Error(
-            "Le code AssociatedAgent a changé. Rechargez la page."
-          );
-        }
-        existing = await ctx.db
-          .query("silwanRealisationSyncs")
-          .withIndex("by_workplace_period", (q) =>
-            q
-              .eq("workplaceId", entry.workplaceId)
-              .eq("year", args.year)
-              .eq("month", args.month)
-          )
-          .unique();
+      const workplace = await ctx.db.get(entry.workplaceId);
+      const isCentralWorkplace =
+        workplace?.name.trim().toLocaleUpperCase("fr-DZ") === "BEN ZARGA";
+      if (!workplace) {
+        throw new Error("Lieu de travail introuvable");
       }
-      const allDocuments =
-        entry.ownerType === "workplace" && entry.allDocuments;
-      const entryPayload =
-        entry.ownerType === "employee"
-          ? {
-              ownerType: entry.ownerType,
-              employeeId: entry.employeeId,
-              associatedAgentCode: entry.associatedAgentCode,
-            }
-          : {
-              ownerType: entry.ownerType,
-              workplaceId: entry.workplaceId,
-              associatedAgentCode: entry.associatedAgentCode,
-            };
+      if (
+        entry.allDocuments
+          ? !isCentralWorkplace || Boolean(entry.associatedAgentCode)
+          : !entry.associatedAgentCode ||
+            workplace.associatedAgentCode?.trim() !== entry.associatedAgentCode
+      ) {
+        throw new Error(
+          "Le code AssociatedAgent a changé. Rechargez la page."
+        );
+      }
+      const existing = await ctx.db
+        .query("silwanRealisationSyncs")
+        .withIndex("by_workplace_period", (q) =>
+          q
+            .eq("workplaceId", entry.workplaceId)
+            .eq("year", args.year)
+            .eq("month", args.month)
+        )
+        .unique();
       const payload = {
-        ...entryPayload,
+        ownerType: entry.ownerType,
+        workplaceId: entry.workplaceId,
+        associatedAgentCode: entry.associatedAgentCode,
         month: args.month,
         year: args.year,
         realisation: Math.round(entry.realisation * 100) / 100,
         recouvrement: Math.round(entry.recouvrement * 100) / 100,
-        sourceType: allDocuments
+        sourceType: entry.allDocuments
           ? ("central_total" as const)
           : ("associated_agent" as const),
         updatedAt: now,
@@ -774,8 +898,19 @@ export const syncInheritedDrafts = mutation({
         q.eq("year", args.year).eq("month", args.month)
       )
       .collect();
+    const workplaceSyncs = await ctx.db
+      .query("silwanRealisationSyncs")
+      .withIndex("by_period", (q) =>
+        q.eq("year", args.year).eq("month", args.month)
+      )
+      .collect();
     const metricsByWorkplace = new Map(
       workplaceMetrics.map((metric) => [metric.workplaceId, metric])
+    );
+    const silwanByWorkplace = new Map(
+      workplaceSyncs
+        .filter((sync) => sync.ownerType === "workplace" && sync.workplaceId)
+        .map((sync) => [sync.workplaceId!, sync])
     );
     const companyRealisationRatio = await companyRealisationRatioForMonth(
       ctx,
@@ -787,8 +922,68 @@ export const syncInheritedDrafts = mutation({
 
     for (const employee of employees) {
       const existing = calculationByEmployee.get(employee._id);
+      if (!hasPrimeRealisationSource(employee)) {
+        if (existing?.status === "BROUILLON") {
+          await ctx.db.delete(existing._id);
+          calculationByEmployee.delete(employee._id);
+        }
+        continue;
+      }
+      if (!isEligibleForPrimePeriod(employee.hireDate, args.year, args.month)) {
+        if (existing?.status === "BROUILLON") {
+          await ctx.db.delete(existing._id);
+          calculationByEmployee.delete(employee._id);
+        }
+        continue;
+      }
+      const sourceIds = employeePrimeSourceIds(employee);
+      const hasExplicitPrimeSources =
+        employee.primeRealisationWorkplaceIds !== undefined ||
+        employee.primeRecoveryWorkplaceIds !== undefined;
+      const realizationSources = aggregateWorkplacePrimeSources(
+        sourceIds.realisation,
+        metricsByWorkplace,
+        silwanByWorkplace
+      );
+      const recoverySources = aggregateWorkplacePrimeSources(
+        sourceIds.recovery,
+        metricsByWorkplace,
+        silwanByWorkplace
+      );
+      const sourceWorkplaceUpdatedAt = Math.max(
+        realizationSources?.updatedAt ?? 0,
+        recoverySources?.updatedAt ?? 0
+      );
+      const recoveryApplies =
+        hasPrimeRecoverySource(employee) && sourceIds.recovery.length > 0;
+      const sourceConfigurationChanged =
+        hasExplicitPrimeSources &&
+        existing?.status === "CONFIRME" &&
+        (!sameWorkplaceIds(
+          existing.sourceRealisationWorkplaceIds,
+          sourceIds.realisation
+        ) ||
+          !sameWorkplaceIds(
+            existing.sourceRecoveryWorkplaceIds,
+            sourceIds.recovery
+          ));
+      const sourceWorkplaceDataChanged =
+        hasExplicitPrimeSources &&
+        existing?.status === "CONFIRME" &&
+        ((sourceWorkplaceUpdatedAt > 0 &&
+          existing.sourceWorkplaceUpdatedAt !== sourceWorkplaceUpdatedAt) ||
+          (realizationSources !== null &&
+            (existing.objective !== realizationSources.objective ||
+              existing.realisation !== realizationSources.realisation ||
+              (recoveryApplies &&
+              recoverySources?.recoveryObjective !== undefined &&
+                (existing.recoveryObjective !==
+                  recoverySources.recoveryObjective ||
+                  existing.recouvrement !== recoverySources.recouvrement)))));
       if (
-        existing?.status === "CONFIRME" ||
+        (existing?.status === "CONFIRME" &&
+          !sourceConfigurationChanged &&
+          !sourceWorkplaceDataChanged) ||
         existing?.hasOwnMetrics === true
       ) {
         continue;
@@ -804,29 +999,54 @@ export const syncInheritedDrafts = mutation({
             recoveryObjective?: number;
             recouvrement?: number;
             sourceWorkplaceId?: Id<"workplaces">;
+            sourceRealisationWorkplaceIds?: Id<"workplaces">[];
+            sourceRecoveryWorkplaceIds?: Id<"workplaces">[];
+            sourceWorkplaceUpdatedAt?: number;
             sourceManagerId?: Id<"users">;
             applyRecoveryAdjustment: boolean;
           }
         | undefined;
 
-      if (workplaceMetric) {
-        const showroomResponsible = isShowroomResponsible(employee.department);
+      if (hasExplicitPrimeSources) {
         if (
-          !showroomResponsible ||
+          realizationSources &&
+          (!recoveryApplies ||
+            (recoverySources?.recoveryObjective !== undefined &&
+              recoverySources.recouvrement !== undefined))
+        ) {
+          source = {
+            objective: realizationSources.objective,
+            realisation: realizationSources.realisation,
+            recoveryObjective: recoveryApplies
+              ? recoverySources?.recoveryObjective
+              : undefined,
+            recouvrement: recoveryApplies
+              ? recoverySources?.recouvrement
+              : undefined,
+            sourceWorkplaceId: sourceIds.realisation[0],
+            sourceRealisationWorkplaceIds: sourceIds.realisation,
+            sourceRecoveryWorkplaceIds: sourceIds.recovery,
+            sourceWorkplaceUpdatedAt,
+            applyRecoveryAdjustment: recoveryApplies,
+          };
+        }
+      } else if (workplaceMetric) {
+        if (
+          !recoveryApplies ||
           (workplaceMetric.recoveryObjective !== undefined &&
             workplaceMetric.recouvrement !== undefined)
         ) {
           source = {
             objective: workplaceMetric.objective,
             realisation: workplaceMetric.realisation,
-            recoveryObjective: showroomResponsible
+            recoveryObjective: recoveryApplies
               ? workplaceMetric.recoveryObjective
               : undefined,
-            recouvrement: showroomResponsible
+            recouvrement: recoveryApplies
               ? workplaceMetric.recouvrement
               : undefined,
             sourceWorkplaceId: workplaceMetric.workplaceId,
-            applyRecoveryAdjustment: showroomResponsible,
+            applyRecoveryAdjustment: recoveryApplies,
           };
         }
       } else {
@@ -1072,10 +1292,37 @@ export const saveDrafts = mutation({
       args.year,
       args.month
     );
+    const workplaceSyncs = await ctx.db
+      .query("silwanRealisationSyncs")
+      .withIndex("by_period", (q) =>
+        q.eq("year", args.year).eq("month", args.month)
+      )
+      .collect();
+    const silwanByWorkplace = new Map(
+      workplaceSyncs
+        .filter((sync) => sync.ownerType === "workplace" && sync.workplaceId)
+        .map((sync) => [sync.workplaceId!, sync])
+    );
     const changedMetricOwnerIds = new Set<Id<"users">>();
     for (const entry of args.entries) {
       const employee = employeeById.get(entry.employeeId);
       if (!employee) throw new Error("Employé introuvable ou inactif");
+      if (
+        employee.role === "employee" &&
+        !hasPrimeRealisationSource(employee)
+      ) {
+        throw new Error(
+          `${employee.name} n'a aucun lieu sélectionné pour les objectifs et réalisations`
+        );
+      }
+      if (
+        employee.role === "employee" &&
+        !isEligibleForPrimePeriod(employee.hireDate, args.year, args.month)
+      ) {
+        throw new Error(
+          `${employee.name} ne peut pas recevoir de prime avant trois mois d'ancienneté`
+        );
+      }
       if (employee.role === "employee" && (employee.baseBonus ?? 0) <= 0) {
         throw new Error(
           `Définissez une prime de base positive pour ${employee.name}`
@@ -1083,10 +1330,12 @@ export const saveDrafts = mutation({
       }
       if (
         entry.objective <= 0 ||
-        (employee.role === "employee" && entry.recoveryObjective <= 0)
+        (employee.role === "employee" &&
+          employeePrimeSourceIds(employee).recovery.length > 0 &&
+          entry.recoveryObjective <= 0)
       ) {
         throw new Error(
-          `Les objectifs de réalisation et de recouvrement doivent être supérieurs à zéro pour ${employee.name}`
+          `Les objectifs de réalisation${employeePrimeSourceIds(employee).recovery.length > 0 ? " et de recouvrement" : ""} doivent être supérieurs à zéro pour ${employee.name}`
         );
       }
       if (
@@ -1132,7 +1381,10 @@ export const saveDrafts = mutation({
         recoveryObjective: entry.recoveryObjective,
         recouvrement: entry.recouvrement,
         evaluationPercent,
-        applyRecoveryAdjustment: employee.role === "employee",
+        applyRecoveryAdjustment:
+          employee.role === "employee" &&
+          (employee.primeRecoveryWorkplaceIds === undefined ||
+            employee.primeRecoveryWorkplaceIds.length > 0),
         ...primeWeights,
       });
       const inputsUnchanged =
@@ -1162,6 +1414,9 @@ export const saveDrafts = mutation({
         hasOwnMetrics: true,
         sourceManagerId: undefined,
         sourceWorkplaceId: undefined,
+        sourceRealisationWorkplaceIds: undefined,
+        sourceRecoveryWorkplaceIds: undefined,
+        sourceWorkplaceUpdatedAt: undefined,
         ...computed,
         adminAdjustedAmount:
           inputsUnchanged && existing?.adminAdjustedAmount !== undefined
@@ -1201,6 +1456,12 @@ export const saveDrafts = mutation({
 
     for (const employee of metricOwners) {
       if (selectedIds.has(employee._id)) continue;
+      if (
+        employee.role === "employee" &&
+        !isEligibleForPrimePeriod(employee.hireDate, args.year, args.month)
+      ) {
+        continue;
+      }
       const existing = calculationByEmployee.get(employee._id);
       if (existing?.hasOwnMetrics === true) {
         changedMetricOwnerIds.add(employee._id);
@@ -1212,6 +1473,9 @@ export const saveDrafts = mutation({
           status: "BROUILLON" as const,
           sourceManagerId: undefined,
           sourceWorkplaceId: undefined,
+          sourceRealisationWorkplaceIds: undefined,
+          sourceRecoveryWorkplaceIds: undefined,
+          sourceWorkplaceUpdatedAt: undefined,
           updatedAt: now,
         };
         await ctx.db.patch(existing._id, {
@@ -1220,6 +1484,9 @@ export const saveDrafts = mutation({
           status: "BROUILLON",
           sourceManagerId: undefined,
           sourceWorkplaceId: undefined,
+          sourceRealisationWorkplaceIds: undefined,
+          sourceRecoveryWorkplaceIds: undefined,
+          sourceWorkplaceUpdatedAt: undefined,
           updatedAt: now,
         });
         calculationByEmployee.set(employee._id, demoted);
@@ -1228,14 +1495,76 @@ export const saveDrafts = mutation({
 
     for (const employee of employees) {
       if (selectedIds.has(employee._id)) continue;
+      if (!hasPrimeRealisationSource(employee)) {
+        const existing = calculationByEmployee.get(employee._id);
+        if (existing?.status === "BROUILLON") {
+          await ctx.db.delete(existing._id);
+          calculationByEmployee.delete(employee._id);
+        }
+        continue;
+      }
 
       const existing = calculationByEmployee.get(employee._id);
+      if (!isEligibleForPrimePeriod(employee.hireDate, args.year, args.month)) {
+        if (existing?.status === "BROUILLON") {
+          await ctx.db.delete(existing._id);
+          calculationByEmployee.delete(employee._id);
+        }
+        continue;
+      }
       const primeWeights = await primeWeightsForEmployee(ctx, employee);
+      const sourceIds = employeePrimeSourceIds(employee);
+      const hasExplicitPrimeSources =
+        employee.primeRealisationWorkplaceIds !== undefined ||
+        employee.primeRecoveryWorkplaceIds !== undefined;
+      const realizationSources = aggregateWorkplacePrimeSources(
+        sourceIds.realisation,
+        metricsByWorkplace,
+        silwanByWorkplace
+      );
+      const recoverySources = aggregateWorkplacePrimeSources(
+        sourceIds.recovery,
+        metricsByWorkplace,
+        silwanByWorkplace
+      );
+      const sourceWorkplaceUpdatedAt = Math.max(
+        realizationSources?.updatedAt ?? 0,
+        recoverySources?.updatedAt ?? 0
+      );
+      const recoveryApplies =
+        hasPrimeRecoverySource(employee) && sourceIds.recovery.length > 0;
+      const sourceWorkplaceDataChanged =
+        hasExplicitPrimeSources &&
+        (existing?.sourceWorkplaceUpdatedAt !== sourceWorkplaceUpdatedAt ||
+          (existing !== undefined &&
+            realizationSources !== null &&
+            (existing.objective !== realizationSources.objective ||
+              existing.realisation !== realizationSources.realisation ||
+              (recoveryApplies &&
+                recoverySources?.recoveryObjective !== undefined &&
+                (existing.recoveryObjective !==
+                  recoverySources.recoveryObjective ||
+                  existing.recouvrement !== recoverySources.recouvrement)))));
+      const sourceConfigurationChanged =
+        hasExplicitPrimeSources &&
+        (!sameWorkplaceIds(
+          existing?.sourceRealisationWorkplaceIds,
+          sourceIds.realisation
+        ) ||
+          !sameWorkplaceIds(
+            existing?.sourceRecoveryWorkplaceIds,
+            sourceIds.recovery
+          ));
       const confirmedSourceChanged =
         existing?.status === "CONFIRME" &&
         existing.hasOwnMetrics === false &&
-        ((existing.sourceWorkplaceId !== undefined &&
-          changedWorkplaceIds.has(existing.sourceWorkplaceId)) ||
+        (sourceConfigurationChanged ||
+          sourceWorkplaceDataChanged ||
+          [...new Set([
+            ...(existing.sourceRealisationWorkplaceIds ?? []),
+            ...(existing.sourceRecoveryWorkplaceIds ?? []),
+            ...(existing.sourceWorkplaceId ? [existing.sourceWorkplaceId] : []),
+          ])].some((workplaceId) => changedWorkplaceIds.has(workplaceId)) ||
           (existing.sourceManagerId !== undefined &&
             changedMetricOwnerIds.has(existing.sourceManagerId)) ||
           existing.objectiveWeightPercent !==
@@ -1268,29 +1597,54 @@ export const saveDrafts = mutation({
             recoveryObjective?: number;
             recouvrement?: number;
             sourceWorkplaceId?: Id<"workplaces">;
+            sourceRealisationWorkplaceIds?: Id<"workplaces">[];
+            sourceRecoveryWorkplaceIds?: Id<"workplaces">[];
+            sourceWorkplaceUpdatedAt?: number;
             sourceManagerId?: Id<"users">;
             applyRecoveryAdjustment: boolean;
           }
         | undefined;
 
-      if (workplaceMetric) {
-        const showroomResponsible = isShowroomResponsible(employee.department);
+      if (hasExplicitPrimeSources) {
         if (
-          !showroomResponsible ||
+          realizationSources &&
+          (!recoveryApplies ||
+            (recoverySources?.recoveryObjective !== undefined &&
+              recoverySources.recouvrement !== undefined))
+        ) {
+          source = {
+            objective: realizationSources.objective,
+            realisation: realizationSources.realisation,
+            recoveryObjective: recoveryApplies
+              ? recoverySources?.recoveryObjective
+              : undefined,
+            recouvrement: recoveryApplies
+              ? recoverySources?.recouvrement
+              : undefined,
+            sourceWorkplaceId: sourceIds.realisation[0],
+            sourceRealisationWorkplaceIds: sourceIds.realisation,
+            sourceRecoveryWorkplaceIds: sourceIds.recovery,
+            sourceWorkplaceUpdatedAt,
+            applyRecoveryAdjustment: recoveryApplies,
+          };
+        }
+      } else if (workplaceMetric) {
+        if (
+          !recoveryApplies ||
           (workplaceMetric.recoveryObjective !== undefined &&
             workplaceMetric.recouvrement !== undefined)
         ) {
           source = {
             objective: workplaceMetric.objective,
             realisation: workplaceMetric.realisation,
-            recoveryObjective: showroomResponsible
+            recoveryObjective: recoveryApplies
               ? workplaceMetric.recoveryObjective
               : undefined,
-            recouvrement: showroomResponsible
+            recouvrement: recoveryApplies
               ? workplaceMetric.recouvrement
               : undefined,
             sourceWorkplaceId: workplaceMetric.workplaceId,
-            applyRecoveryAdjustment: showroomResponsible,
+            applyRecoveryAdjustment: recoveryApplies,
           };
         }
       } else {
@@ -1408,15 +1762,27 @@ export const confirmBatch = mutation({
       if (!employee || employee.role !== "employee" || employee.resignedAt) {
         continue;
       }
+      if (!hasPrimeRealisationSource(employee)) {
+        throw new Error(
+          `${employee.name} n'a aucun lieu sélectionné pour les objectifs et réalisations`
+        );
+      }
+      if (!isEligibleForPrimePeriod(employee.hireDate, row.year, row.month)) {
+        throw new Error(
+          `${employee.name} ne peut pas recevoir de prime avant trois mois d'ancienneté`
+        );
+      }
       if ((employee.baseBonus ?? 0) <= 0) {
         throw new Error(
           `Définissez une prime de base positive pour ${employee.name}`
         );
       }
+      const hasRecoverySource = hasPrimeRecoverySource(employee);
       const applyRecoveryAdjustment =
-        row.hasOwnMetrics === true ||
-        (row.sourceWorkplaceId !== undefined &&
-          isShowroomResponsible(employee.department));
+        row.hasOwnMetrics === true
+          ? employee.primeRecoveryWorkplaceIds === undefined ||
+            hasRecoverySource
+          : row.sourceWorkplaceId !== undefined && hasRecoverySource;
       if (
         applyRecoveryAdjustment &&
         (!row.recoveryObjective || row.recoveryObjective <= 0)

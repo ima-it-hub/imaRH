@@ -67,6 +67,7 @@ export default function AdminPrimesPage() {
     () =>
       (primeRows ?? []).filter(
         (row) =>
+          row.primeEligible &&
           row.employee.role === "employee" &&
           row.calculation?.calculationVersion === 2
       ),
@@ -214,6 +215,10 @@ export default function AdminPrimesPage() {
               Calculs à confirmer
             </h2>
             <p className="mt-1 text-sm text-zinc-500">
+              Les employés deviennent éligibles après trois mois
+              d&apos;ancienneté, calculés à la fin du mois de prime.
+            </p>
+            {/* <p className="mt-1 text-sm text-zinc-500">
               Les primes héritées utilisent les objectifs et résultats du lieu
               de travail lorsqu&apos;ils sont enregistrés; sinon, elles
               reprennent ceux du manager. Le recouvrement du lieu s&apos;applique
@@ -222,17 +227,18 @@ export default function AdminPrimesPage() {
               pour être modifiés puis confirmés à nouveau. Vous pouvez ajuster
               directement le montant de la prime calculée; la modification est
               appliquée lors de la confirmation.
-            </p>
+            </p> */}
           </div>
 
           <div className="mt-5 overflow-x-auto">
-            <table className="min-w-full text-sm">
+            <table className="w-full min-w-[1120px] text-sm">
               <thead className="text-xs uppercase text-zinc-500">
                 <tr>
                   <th className="pb-3 pr-3 text-left">Employé</th>
                   <th className="pb-3 pr-3 text-left">Données</th>
                   <th className="pb-3 pr-3 text-right">Prime de base</th>
-                  <th className="pb-3 pr-3 text-right">Réalisation</th>
+                  <th className="pb-3 pr-3 text-right">Personnel</th>
+                  <th className="pb-3 pr-3 text-right">Entreprise</th>
                   <th className="pb-3 pr-3 text-right">Recouvrement</th>
                   <th className="pb-3 pr-3 text-right">Évaluation</th>
                   <th className="pb-3 pr-3 text-right">Prime calculée</th>
@@ -242,22 +248,29 @@ export default function AdminPrimesPage() {
               <tbody>
                 {pendingRows.map((row) => {
                   const calc = row.calculation!;
+                  const companyRealisationWeight =
+                    calc.companyRealisationWeightPercent ?? 0;
                   return (
                     <tr
                       key={calc._id}
                       className="border-t border-zinc-100"
                     >
                       <td className="py-3 pr-3 font-medium text-zinc-900">
+                        <div className="min-w-[120px]">
                         {row.employee.name}
+                        </div>
                       </td>
-                      <td className="py-3 pr-3">
+                      <td className="min-w-[150px] py-3 pr-3">
                         {calc.hasOwnMetrics ? (
                           <Badge className="bg-sky-100 text-sky-800">
                             Individuelles
                           </Badge>
                         ) : calc.sourceWorkplaceId ? (
                           <Badge className="bg-emerald-100 text-emerald-800">
-                            Lieu : {row.workplaceName || "—"}
+                            Lieu :{" "}
+                            {row.primeSourceWorkplaceNames.length
+                              ? row.primeSourceWorkplaceNames.join(", ")
+                              : row.workplaceName || "—"}
                           </Badge>
                         ) : (
                           <Badge className="bg-zinc-100 text-zinc-700">
@@ -265,24 +278,32 @@ export default function AdminPrimesPage() {
                           </Badge>
                         )}
                       </td>
-                      <td className="py-3 pr-3 text-right">
+                      <td className="min-w-[115px] whitespace-nowrap py-3 pr-3 text-right">
                         {moneyDZD(calc.primeBase)}
                       </td>
-                      <td className="py-3 pr-3 text-right">
-                        {(calc.objectiveRatio * 100).toFixed(1)}% ·{" "}
+                      <td className="min-w-[165px] whitespace-nowrap py-3 pr-3 text-right">
+                        {(calc.objectiveRatio * 100).toFixed(1)}% ×{" "}
+                        {calc.objectiveWeightPercent}% ·{" "}
                         {moneyDZD(calc.objectiveAmount)}
                       </td>
-                      <td className="py-3 pr-3 text-right">
-                        {calc.hasOwnMetrics ||
-                        (calc.sourceWorkplaceId && row.usesWorkplaceRecovery)
+                      <td className="min-w-[165px] whitespace-nowrap py-3 pr-3 text-right">
+                        {companyRealisationWeight > 0
+                          ? `${(((calc.companyRealisationRatio ?? 0) * 100).toFixed(1))}% × ${companyRealisationWeight}% · ${moneyDZD(calc.companyRealisationAmount ?? 0)}`
+                          : "—"}
+                      </td>
+                      <td className="min-w-[125px] whitespace-nowrap py-3 pr-3 text-right">
+                        {row.hasRecoverySource &&
+                        (calc.hasOwnMetrics ||
+                          (calc.sourceWorkplaceId &&
+                            row.usesWorkplaceRecovery))
                           ? `${(calc.recoveryRatio * 100).toFixed(1)}% · ${moneyDZD(calc.recoveryAmount)}`
                           : "—"}
                       </td>
-                      <td className="py-3 pr-3 text-right">
+                      <td className="min-w-[115px] whitespace-nowrap py-3 pr-3 text-right">
                         {calc.evaluationPercent}% ·{" "}
                         {moneyDZD(calc.evaluationAmount)}
                       </td>
-                      <td className="py-3 pr-3 text-right font-semibold">
+                      <td className="min-w-[135px] py-3 pr-3 text-right font-semibold">
                         <input
                           type="number"
                           min={0}
@@ -300,7 +321,7 @@ export default function AdminPrimesPage() {
                           }
                         />
                       </td>
-                      <td className="py-3 text-right">
+                      <td className="min-w-[95px] py-3 text-right">
                         <Badge
                           className={
                             calc.status === "CONFIRME"
@@ -324,7 +345,7 @@ export default function AdminPrimesPage() {
                 })}
                 {!pendingRows.length ? (
                   <tr>
-                    <td colSpan={8} className="py-6 text-sm text-zinc-500">
+                    <td colSpan={9} className="py-6 text-sm text-zinc-500">
                       Aucune prime en attente. Enregistrez les données du lieu
                       de travail ou du manager dans Calcul des primes; les
                       employés concernés seront ajoutés automatiquement.

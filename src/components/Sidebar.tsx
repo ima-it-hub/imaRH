@@ -70,8 +70,11 @@ export function Sidebar() {
 
   const nav = (
     <aside className="flex h-full min-h-0 w-72 flex-col overflow-hidden bg-[#1A2744] text-white">
-      <div className="shrink-0 border-b border-white/10 px-5 py-5">
-        <Logo variant="compact" />
+      <div className="shrink-0 border-b border-white/10 px-5 py-6">
+        <Logo
+          variant="compact"
+          className="lg:[&_img]:!max-h-20 lg:[&_img]:!max-w-56"
+        />
       </div>
 
       <nav className="sidebar-scroll min-h-0 flex-1 space-y-1 overflow-x-hidden px-3 py-4">
@@ -150,7 +153,7 @@ export function Sidebar() {
         {nav}
       </div>
 
-      <div className="fixed inset-x-0 top-0 z-30 flex h-16 items-center border-b border-zinc-200 bg-white px-4 lg:hidden">
+      <div className="fixed inset-x-0 top-0 z-30 flex h-20 items-center border-b border-zinc-200 bg-white px-4 lg:hidden">
         <button
           type="button"
           onClick={() => setOpen((value) => !value)}
@@ -160,8 +163,11 @@ export function Sidebar() {
         >
           {open ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
         </button>
-        <div className="absolute left-1/2 h-12 w-36 -translate-x-1/2">
-          <Logo variant="compact" />
+        <div className="absolute left-1/2 h-16 w-48 -translate-x-1/2">
+          <Logo
+            variant="compact"
+            className="[&_img]:!max-h-16 [&_img]:!max-w-48"
+          />
         </div>
       </div>
 

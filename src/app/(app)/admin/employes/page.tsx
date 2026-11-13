@@ -33,6 +33,49 @@ function hireDateToTimestamp(isoDate: string) {
   return new Date(`${isoDate}T12:00:00+01:00`).getTime();
 }
 
+function WorkplaceSourceSelector({
+  label,
+  workplaces,
+  selectedIds,
+  onChange,
+}: {
+  label: string;
+  workplaces: { _id: Id<"workplaces">; name: string }[];
+  selectedIds: Id<"workplaces">[];
+  onChange: (ids: Id<"workplaces">[]) => void;
+}) {
+  return (
+    <fieldset className="rounded-xl border border-zinc-200 p-3">
+      <legend className="px-1 text-sm font-medium text-zinc-700">{label}</legend>
+      <div className="grid gap-2 sm:grid-cols-2">
+        {workplaces.map((workplace) => (
+          <label
+            key={workplace._id}
+            className="flex items-center gap-2 text-sm text-zinc-700"
+          >
+            <input
+              type="checkbox"
+              className="accent-[#0088E8]"
+              checked={selectedIds.includes(workplace._id)}
+              onChange={() =>
+                onChange(
+                  selectedIds.includes(workplace._id)
+                    ? selectedIds.filter((id) => id !== workplace._id)
+                    : [...selectedIds, workplace._id]
+                )
+              }
+            />
+            {workplace.name}
+          </label>
+        ))}
+        {!workplaces.length ? (
+          <p className="text-sm text-zinc-500">Aucun lieu de travail configuré.</p>
+        ) : null}
+      </div>
+    </fieldset>
+  );
+}
+
 export default function AdminEmployesPage() {
   const { token, user } = useAuth();
   const [search, setSearch] = useState("");
@@ -44,13 +87,16 @@ export default function AdminEmployesPage() {
   const [role, setRole] = useState<"admin" | "employee">("employee");
   const [departmentId, setDepartmentId] = useState("");
   const [workplaceId, setWorkplaceId] = useState("");
+  const [primeRealisationWorkplaceIds, setPrimeRealisationWorkplaceIds] =
+    useState<Id<"workplaces">[] | null>(null);
+  const [primeRecoveryWorkplaceIds, setPrimeRecoveryWorkplaceIds] =
+    useState<Id<"workplaces">[] | null>(null);
   const [managerId, setManagerId] = useState("");
   const [baseSalary, setBaseSalary] = useState("85000");
   const [baseBonus, setBaseBonus] = useState("10000");
   const [annualLeaveQuota, setAnnualLeaveQuota] = useState("30");
   const [hireDate, setHireDate] = useState(todayISOLocal());
   const [zktecoUserId, setZktecoUserId] = useState("");
-  const [associatedAgentCode, setAssociatedAgentCode] = useState("");
 
   const users = useQuery(api.users.list, token ? { token } : "skip");
   const workplaces = useQuery(
@@ -123,6 +169,13 @@ export default function AdminEmployesPage() {
         setBusy(false);
         return;
       }
+      const defaultWorkplaceSource = workplaceId
+        ? [workplaceId as Id<"workplaces">]
+        : [];
+      const realisationSources =
+        primeRealisationWorkplaceIds ?? defaultWorkplaceSource;
+      const recoverySources =
+        primeRecoveryWorkplaceIds ?? defaultWorkplaceSource;
       await createUser({
         token,
         firstName,
@@ -138,6 +191,10 @@ export default function AdminEmployesPage() {
         workplaceId: workplaceId
           ? (workplaceId as Id<"workplaces">)
           : undefined,
+        primeRealisationWorkplaceIds:
+          role === "employee" ? realisationSources : undefined,
+        primeRecoveryWorkplaceIds:
+          role === "employee" ? recoverySources : undefined,
         managerId:
           role === "employee" && managerId
             ? (managerId as Id<"users">)
@@ -150,10 +207,6 @@ export default function AdminEmployesPage() {
           role === "employee" && zktecoUserId.trim()
             ? zktecoUserId.trim()
             : undefined,
-        associatedAgentCode:
-          role === "employee" && associatedAgentCode.trim()
-            ? associatedAgentCode.trim()
-            : undefined,
       });
       setSuccess("Collaborateur créé");
       setFirstName("");
@@ -163,11 +216,12 @@ export default function AdminEmployesPage() {
       setPassword("");
       setDepartmentId("");
       setWorkplaceId("");
+      setPrimeRealisationWorkplaceIds(null);
+      setPrimeRecoveryWorkplaceIds(null);
       setManagerId("");
       setBaseBonus("10000");
       setHireDate(todayISOLocal());
       setZktecoUserId("");
-      setAssociatedAgentCode("");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Erreur");
     } finally {
@@ -370,13 +424,37 @@ export default function AdminEmployesPage() {
               </Field>
               {role === "employee" ? (
                 <>
-                  <Field label="Code AssociatedAgent (Silwan)">
-                    <input
-                      className={inputClass}
-                      value={associatedAgentCode}
-                      onChange={(e) => setAssociatedAgentCode(e.target.value)}
+                  <p className="text-sm text-zinc-500 sm:col-span-2">
+                    Les objectifs et réalisations, ainsi que le recouvrement,
+                    sont additionnés séparément depuis les lieux sélectionnés.
+                    Sans lieu de réalisation, aucune prime ne sera calculée.
+                    Sans lieu de recouvrement, l&apos;employé ne sera pas
+                    responsable du recouvrement.
+                  </p>
+                  <div className="space-y-3 sm:col-span-2">
+                    <WorkplaceSourceSelector
+                      label="Objectifs et réalisations de ces lieux"
+                      workplaces={workplaces ?? []}
+                      selectedIds={
+                        primeRealisationWorkplaceIds ??
+                        (workplaceId
+                          ? [workplaceId as Id<"workplaces">]
+                          : [])
+                      }
+                      onChange={setPrimeRealisationWorkplaceIds}
                     />
-                  </Field>
+                    <WorkplaceSourceSelector
+                      label="Objectifs et recouvrements de ces lieux"
+                      workplaces={workplaces ?? []}
+                      selectedIds={
+                        primeRecoveryWorkplaceIds ??
+                        (workplaceId
+                          ? [workplaceId as Id<"workplaces">]
+                          : [])
+                      }
+                      onChange={setPrimeRecoveryWorkplaceIds}
+                    />
+                  </div>
                   <Field label="Manager">
                     <select
                       required
@@ -413,7 +491,7 @@ export default function AdminEmployesPage() {
                     onChange={(e) => setBaseSalary(e.target.value)}
                   />
                 </Field>
-                <Field label="Quota annuel de congés (jours)">
+                <Field label="annuel de congés (jours)">
                   <input
                     type="number"
                     min={0}
@@ -767,6 +845,8 @@ function EmployeeQuickEdit({
     department: string;
     departmentId: Id<"departments"> | null;
     workplaceId?: Id<"workplaces"> | null;
+    primeRealisationWorkplaceIds: Id<"workplaces">[];
+    primeRecoveryWorkplaceIds: Id<"workplaces">[];
     managerId: Id<"users"> | null;
     phone: string;
     baseSalary: number;
@@ -774,7 +854,6 @@ function EmployeeQuickEdit({
     annualLeaveQuota: number;
     hireDate?: number | null;
     zktecoUserId?: string;
-    associatedAgentCode?: string;
   };
   token: string;
   departments: {
@@ -794,6 +873,8 @@ function EmployeeQuickEdit({
     lastName: string;
     departmentId?: Id<"departments">;
     workplaceId?: Id<"workplaces">;
+    primeRealisationWorkplaceIds: Id<"workplaces">[];
+    primeRecoveryWorkplaceIds: Id<"workplaces">[];
     managerId?: Id<"users">;
     phone: string;
     baseSalary: number;
@@ -801,7 +882,6 @@ function EmployeeQuickEdit({
     annualLeaveQuota: number;
     hireDate?: number;
     zktecoUserId?: string;
-    associatedAgentCode?: string;
   }) => Promise<unknown>;
 }) {
   const [open, setOpen] = useState(false);
@@ -810,6 +890,8 @@ function EmployeeQuickEdit({
     lastName: user.lastName,
     departmentId: user.departmentId ?? "",
     workplaceId: user.workplaceId ?? "",
+    primeRealisationWorkplaceIds: user.primeRealisationWorkplaceIds,
+    primeRecoveryWorkplaceIds: user.primeRecoveryWorkplaceIds,
     managerId: user.managerId ?? "",
     phone: user.phone,
     baseSalary: user.baseSalary,
@@ -817,7 +899,6 @@ function EmployeeQuickEdit({
     annualLeaveQuota: user.annualLeaveQuota,
     hireDate: hireDateInputValue(user.hireDate),
     zktecoUserId: user.zktecoUserId ?? "",
-    associatedAgentCode: user.associatedAgentCode ?? "",
   });
   const [msg, setMsg] = useState("");
 
@@ -878,18 +959,34 @@ function EmployeeQuickEdit({
               ))}
             </select>
           </Field>
-          <Field label="Code AssociatedAgent (Silwan)">
-            <input
-              className={inputClass}
-              value={form.associatedAgentCode}
-              onChange={(e) =>
+          <div className="space-y-3 sm:col-span-2">
+            <p className="text-sm text-zinc-500">
+              Les montants des lieux sélectionnés sont additionnés
+              séparément pour les objectifs/réalisations et le recouvrement.
+            </p>
+            <WorkplaceSourceSelector
+              label="Objectifs et réalisations de ces lieux"
+              workplaces={workplaces}
+              selectedIds={form.primeRealisationWorkplaceIds}
+              onChange={(ids) =>
                 setForm((prev) => ({
                   ...prev,
-                  associatedAgentCode: e.target.value,
+                  primeRealisationWorkplaceIds: ids,
                 }))
               }
             />
-          </Field>
+            <WorkplaceSourceSelector
+              label="Objectifs et recouvrements de ces lieux"
+              workplaces={workplaces}
+              selectedIds={form.primeRecoveryWorkplaceIds}
+              onChange={(ids) =>
+                setForm((prev) => ({
+                  ...prev,
+                  primeRecoveryWorkplaceIds: ids,
+                }))
+              }
+            />
+          </div>
           <Field label="Manager">
             <select
               className={inputClass}
@@ -998,6 +1095,9 @@ function EmployeeQuickEdit({
                   workplaceId: form.workplaceId
                     ? (form.workplaceId as Id<"workplaces">)
                     : undefined,
+                  primeRealisationWorkplaceIds:
+                    form.primeRealisationWorkplaceIds,
+                  primeRecoveryWorkplaceIds: form.primeRecoveryWorkplaceIds,
                   managerId: form.managerId
                     ? (form.managerId as Id<"users">)
                     : undefined,
@@ -1007,7 +1107,6 @@ function EmployeeQuickEdit({
                   annualLeaveQuota: form.annualLeaveQuota,
                   hireDate: hireTs,
                   zktecoUserId: form.zktecoUserId,
-                  associatedAgentCode: form.associatedAgentCode,
                 });
                 setMsg("Fiche enregistrée");
               }}

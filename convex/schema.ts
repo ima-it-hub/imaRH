@@ -20,6 +20,8 @@ export default defineSchema({
     workplace: v.optional(v.string()),
     workplaceId: v.optional(v.id("workplaces")),
     associatedAgentCode: v.optional(v.string()),
+    primeRealisationWorkplaceIds: v.optional(v.array(v.id("workplaces"))),
+    primeRecoveryWorkplaceIds: v.optional(v.array(v.id("workplaces"))),
     silwanCategoryCode: v.optional(v.string()),
     managerId: v.optional(v.id("users")),
     /** Legacy prime mode; new prime calculations use baseBonus for everyone. */
@@ -422,6 +424,9 @@ export default defineSchema({
     sourceManagerId: v.optional(v.id("users")),
     /** Workplace whose metrics are inherited when hasOwnMetrics is false */
     sourceWorkplaceId: v.optional(v.id("workplaces")),
+    sourceRealisationWorkplaceIds: v.optional(v.array(v.id("workplaces"))),
+    sourceRecoveryWorkplaceIds: v.optional(v.array(v.id("workplaces"))),
+    sourceWorkplaceUpdatedAt: v.optional(v.number()),
     /** Version of the prime formula used for this saved calculation */
     calculationVersion: v.optional(v.number()),
     /** Fixed base prime in DZD */

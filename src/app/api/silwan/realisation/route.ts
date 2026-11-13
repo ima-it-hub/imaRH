@@ -259,14 +259,16 @@ export async function POST(request: Request) {
       const [transactionRow] = await connected.query<TransactionAggregate>(
         `
           SELECT COALESCE(
-            SUM(COALESCE("Credit", 0) - COALESCE("Debit", 0)),
+            SUM(COALESCE(t."Credit", 0) - COALESCE(t."Debit", 0)),
             0
           ) AS "Recouvrement"
-          FROM "COM_Transaction"
-          WHERE "TransactionDate" >= ?
-            AND "TransactionDate" < ?
-            AND "ThirdParty" IS NOT NULL
-            AND "DeletionDate" IS NULL
+          FROM "COM_Transaction" AS t
+          INNER JOIN "COM_ThirdParty" AS tp
+            ON t."ThirdParty" = tp."Oid"
+          WHERE t."TransactionDate" >= ?
+            AND t."TransactionDate" < ?
+            AND t."DeletionDate" IS NULL
+            AND tp."AssociatedAgent" IS NOT NULL
         `,
         [startDate, endDate]
       );

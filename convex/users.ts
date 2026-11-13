@@ -1,4 +1,5 @@
-import { mutation, query } from "./_generated/server";
+import { mutation, query, MutationCtx } from "./_generated/server";
+import type { Id } from "./_generated/dataModel";
 import { v } from "convex/values";
 import {
   annualLeaveBalanceForYear,
@@ -16,6 +17,26 @@ import {
   requireAdminPage,
   todayISO,
 } from "./lib";
+
+async function validatePrimeWorkplaceIds(
+  ctx: MutationCtx,
+  ids: Id<"workplaces">[],
+  label: string,
+  allowEmpty = false
+) {
+  if ((!allowEmpty && !ids.length) || new Set(ids).size !== ids.length) {
+    throw new Error(
+      allowEmpty
+        ? `La sélection des lieux pour ${label} est invalide.`
+        : `Sélectionnez au moins un lieu pour ${label}.`
+    );
+  }
+  for (const id of ids) {
+    if (!(await ctx.db.get(id))) {
+      throw new Error(`Un lieu sélectionné pour ${label} est introuvable.`);
+    }
+  }
+}
 
 export const list = query({
   args: { token: v.string() },
@@ -100,7 +121,10 @@ export const create = mutation({
     department: v.optional(v.string()),
     departmentId: v.optional(v.id("departments")),
     workplaceId: v.optional(v.id("workplaces")),
-    associatedAgentCode: v.optional(v.string()),
+    primeRealisationWorkplaceIds: v.optional(
+      v.array(v.id("workplaces"))
+    ),
+    primeRecoveryWorkplaceIds: v.optional(v.array(v.id("workplaces"))),
     managerId: v.optional(v.id("users")),
     phone: v.optional(v.string()),
     baseSalary: v.optional(v.number()),
@@ -163,6 +187,28 @@ export const create = mutation({
       const wp = await ctx.db.get(workplaceId);
       if (!wp) throw new Error("Lieu de travail introuvable");
       workplaceName = wp.name;
+    }
+    const primeRealisationWorkplaceIds =
+      args.role === "employee"
+        ? args.primeRealisationWorkplaceIds ?? [workplaceId!]
+        : [];
+    const primeRecoveryWorkplaceIds =
+      args.role === "employee"
+        ? args.primeRecoveryWorkplaceIds ?? [workplaceId!]
+        : [];
+    if (args.role === "employee") {
+      await validatePrimeWorkplaceIds(
+        ctx,
+        primeRealisationWorkplaceIds,
+        "les objectifs et réalisations",
+        true
+      );
+      await validatePrimeWorkplaceIds(
+        ctx,
+        primeRecoveryWorkplaceIds,
+        "le recouvrement",
+        true
+      );
     }
 
     let departmentName = args.department?.trim() ?? "";
@@ -237,7 +283,10 @@ export const create = mutation({
       departmentId,
       workplace: workplaceName || undefined,
       workplaceId,
-      associatedAgentCode: args.associatedAgentCode?.trim() || undefined,
+      primeRealisationWorkplaceIds:
+        args.role === "employee" ? primeRealisationWorkplaceIds : undefined,
+      primeRecoveryWorkplaceIds:
+        args.role === "employee" ? primeRecoveryWorkplaceIds : undefined,
       managerId: args.role === "employee" ? args.managerId : undefined,
       hireDate,
       annualLeaveBalance: annualLeaveEntitlement(
@@ -296,7 +345,10 @@ export const updateEmployee = mutation({
     department: v.optional(v.string()),
     departmentId: v.optional(v.id("departments")),
     workplaceId: v.optional(v.id("workplaces")),
-    associatedAgentCode: v.optional(v.string()),
+    primeRealisationWorkplaceIds: v.optional(
+      v.array(v.id("workplaces"))
+    ),
+    primeRecoveryWorkplaceIds: v.optional(v.array(v.id("workplaces"))),
     managerId: v.optional(v.id("users")),
     phone: v.string(),
     baseSalary: v.number(),
@@ -365,6 +417,28 @@ export const updateEmployee = mutation({
     if (user.role === "employee" && !workplaceId) {
       throw new Error("Chaque employé doit avoir un lieu de travail");
     }
+    const primeRealisationWorkplaceIds =
+      args.primeRealisationWorkplaceIds ??
+      user.primeRealisationWorkplaceIds ??
+      (workplaceId ? [workplaceId] : []);
+    const primeRecoveryWorkplaceIds =
+      args.primeRecoveryWorkplaceIds ??
+      user.primeRecoveryWorkplaceIds ??
+      (workplaceId ? [workplaceId] : []);
+    if (user.role === "employee") {
+      await validatePrimeWorkplaceIds(
+        ctx,
+        primeRealisationWorkplaceIds,
+        "les objectifs et réalisations",
+        true
+      );
+      await validatePrimeWorkplaceIds(
+        ctx,
+        primeRecoveryWorkplaceIds,
+        "le recouvrement",
+        true
+      );
+    }
 
     if (args.managerId) {
       if (args.managerId === args.userId) {
@@ -414,9 +488,14 @@ export const updateEmployee = mutation({
       departmentId,
       workplace: workplaceName || undefined,
       workplaceId,
-      associatedAgentCode: args.associatedAgentCode?.trim() || undefined,
       ...(args.managerId !== undefined
         ? { managerId: args.managerId }
+        : {}),
+      ...(user.role === "employee"
+        ? {
+            primeRealisationWorkplaceIds,
+            primeRecoveryWorkplaceIds,
+          }
         : {}),
       phone: args.phone.trim(),
       baseSalary: args.baseSalary,

@@ -193,25 +193,37 @@ export default function AdminCalculPrimesPage() {
         objective:
           row.annualObjective !== null
             ? String(row.annualObjective)
-            : calc?.calculationVersion === 2
+            : calc?.hasOwnMetrics !== true &&
+                row.primeSourceObjective !== null
+              ? String(row.primeSourceObjective)
+              : calc?.calculationVersion === 2
               ? String(calc.objective)
               : row.previousMonthObjective !== null
                 ? String(row.previousMonthObjective)
                 : "",
         realisation:
-          row.silwanRealisation !== null
+          calc?.hasOwnMetrics !== true &&
+          row.primeSourceRealisation !== null
+            ? formatRealisation(row.primeSourceRealisation)
+            : row.silwanRealisation !== null
             ? formatRealisation(row.silwanRealisation)
             : calc?.realisation !== undefined
               ? formatRealisation(calc.realisation)
               : "",
         recoveryObjective:
-          calc?.recoveryObjective !== undefined
-            ? String(calc.recoveryObjective)
+          calc?.hasOwnMetrics !== true &&
+          row.primeSourceRecoveryObjective !== null
+            ? formatRealisation(row.primeSourceRecoveryObjective)
+            : calc?.recoveryObjective !== undefined
+            ? formatRealisation(calc.recoveryObjective)
             : row.previousMonthRecoveryObjective !== null
-              ? String(row.previousMonthRecoveryObjective)
+              ? formatRealisation(row.previousMonthRecoveryObjective)
               : "",
         recouvrement:
-          row.silwanRecouvrement !== null
+          calc?.hasOwnMetrics !== true &&
+          row.primeSourceRecouvrement !== null
+            ? formatRealisation(row.primeSourceRecouvrement)
+            : row.silwanRecouvrement !== null
             ? formatRealisation(row.silwanRecouvrement)
             : calc?.recouvrement !== undefined
               ? formatRealisation(calc.recouvrement)
@@ -245,9 +257,9 @@ export default function AdminCalculPrimesPage() {
                 : "",
         recoveryObjective:
           metric?.recoveryObjective !== undefined
-            ? String(metric.recoveryObjective)
+            ? formatRealisation(metric.recoveryObjective)
             : row.previousMonthRecoveryObjective !== null
-              ? String(row.previousMonthRecoveryObjective)
+              ? formatRealisation(row.previousMonthRecoveryObjective)
               : "",
         recouvrement:
           row.silwanRecouvrement !== null
@@ -262,18 +274,20 @@ export default function AdminCalculPrimesPage() {
   }, [workplaceRows, workplaceOverrides]);
 
   const selectedCount = (rows ?? []).filter(
-    (row) => drafts[row.employee._id]?.selected
+    (row) => row.primeEligible && drafts[row.employee._id]?.selected
   ).length;
   const selectedRows = (rows ?? []).filter(
-    (row) => drafts[row.employee._id]?.selected
+    (row) => row.primeEligible && drafts[row.employee._id]?.selected
   );
   const availableToAdd = (rows ?? []).filter(
     (row) =>
+      row.primeEligible &&
       !drafts[row.employee._id]?.selected &&
       (row.employee.role !== "employee" || row.employee.baseBonus > 0)
   );
   const hasSelectionChanges = (rows ?? []).some(
     (row) =>
+      row.primeEligible &&
       (row.calculation?.hasOwnMetrics === true) !==
         (drafts[row.employee._id]?.selected === true)
   );
@@ -290,9 +304,9 @@ export default function AdminCalculPrimesPage() {
       draft.realisation !== (metric ? String(metric.realisation) : "") ||
       draft.recoveryObjective !==
         (metric?.recoveryObjective !== undefined
-          ? String(metric.recoveryObjective)
+          ? formatRealisation(metric.recoveryObjective)
           : row.previousMonthRecoveryObjective !== null
-            ? String(row.previousMonthRecoveryObjective)
+            ? formatRealisation(row.previousMonthRecoveryObjective)
             : "") ||
       draft.recouvrement !==
         (metric?.recouvrement !== undefined ? String(metric.recouvrement) : "")
@@ -412,27 +426,10 @@ export default function AdminCalculPrimesPage() {
           ]
         : [];
     });
-    const entries = [
-      ...workplaceEntries,
-      ...rows.flatMap(({ employee }) =>
-        employee.role === "employee" &&
-        employee.baseBonus > 0 &&
-        employee.associatedAgentCode?.trim()
-          ? [
-              {
-                key: `employee:${employee._id}`,
-                code: employee.associatedAgentCode,
-                allDocuments: false,
-                kind: "employee" as const,
-                employeeId: employee._id,
-              },
-            ]
-          : []
-      ),
-    ];
+    const entries = workplaceEntries;
     if (!entries.length) {
       setError(
-        "Aucun code AssociatedAgent n'est défini sur les fiches employé ou lieu de travail."
+        "Aucun code AssociatedAgent n'est défini sur les lieux de travail."
       );
       return;
     }
@@ -471,18 +468,6 @@ export default function AdminCalculPrimesPage() {
         token,
         month,
         year,
-        employeeEntries: matchedResults.flatMap((result) => {
-          const requestEntry = requestByKey.get(result.key);
-          if (!requestEntry || requestEntry.kind !== "employee") return [];
-          return [
-            {
-              employeeId: requestEntry.employeeId,
-              associatedAgentCode: requestEntry.code,
-              realisation: Number(formatRealisation(result.totalRealisation)),
-              recouvrement: Number(formatRealisation(result.totalRecouvrement)),
-            },
-          ];
-        }),
         workplaceEntries: matchedResults.flatMap((result) => {
           const requestEntry = requestByKey.get(result.key);
           if (!requestEntry || requestEntry.kind !== "workplace") return [];

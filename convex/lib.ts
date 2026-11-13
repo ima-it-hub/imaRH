@@ -142,6 +142,12 @@ export function publicUser(user: Doc<"users">) {
     workplace: user.workplace ?? "",
     workplaceId: user.workplaceId ?? null,
     associatedAgentCode: user.associatedAgentCode ?? "",
+    primeRealisationWorkplaceIds:
+      user.primeRealisationWorkplaceIds ??
+      (user.workplaceId ? [user.workplaceId] : []),
+    primeRecoveryWorkplaceIds:
+      user.primeRecoveryWorkplaceIds ??
+      (user.workplaceId ? [user.workplaceId] : []),
     managerId: user.managerId ?? null,
     baseBonus: user.baseBonus ?? 0,
     hireDate: user.hireDate ?? null,
